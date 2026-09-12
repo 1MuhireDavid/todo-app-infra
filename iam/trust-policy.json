@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "cloudformation.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": "047719661196"
+        },
+        "ArnLike": {
+          "aws:SourceArn": [
+            "arn:aws:cloudformation:us-east-1:047719661196:stack/todo-app/*",
+            "arn:aws:cloudformation:us-east-1:047719661196:stack/todo-app-*Stack-*/*"
+          ]
+        }
+      }
+    }
+  ]
+}
