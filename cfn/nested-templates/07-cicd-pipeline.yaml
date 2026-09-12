@@ -1,0 +1,413 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Delivery tier: CodeDeploy blue/green application and deployment group, the
+  two-source CodePipeline that drives it, and the EventBridge rule that starts
+  the pipeline on an ECR push.
+
+  The artifact bucket is not created here - it belongs to the bootstrap stack,
+  because the ALB in 06 needs it for access logs and this stack has to be
+  created after 06.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Description: Name prefix and Project tag value for every resource.
+
+  ArtifactBucketName:
+    Type: String
+    Description: Pipeline artifact bucket, from the bootstrap stack.
+
+  ArtifactBucketArn:
+    Type: String
+    Description: Pipeline artifact bucket ARN, for scoping the pipeline role.
+
+  DeployBundleKey:
+    Type: String
+    Default: source/deploy-templates.zip
+    Description: >-
+      Key the application build workflow uploads the appspec and taskdef bundle
+      to. Must match the key in build-and-push.yml.
+
+  EcrRepositoryName:
+    Type: String
+    Description: ECR repository the image source action watches.
+
+  EcrRepositoryArn:
+    Type: String
+    Description: ECR repository ARN, for scoping the pipeline role.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: >-
+      The tag that triggers a deployment. The build pushes both sha-<short> and
+      this tag; only a push of this one starts the pipeline, so the immutable
+      sha tag stays available for rollback without redeploying anything.
+
+  ClusterName:
+    Type: String
+    Description: ECS cluster hosting the service.
+
+  ServiceName:
+    Type: String
+    Description: ECS service CodeDeploy deploys to.
+
+  TargetGroupBlueName:
+    Type: String
+    Description: Blue target group name.
+
+  TargetGroupGreenName:
+    Type: String
+    Description: Green target group name.
+
+  ProdListenerArn:
+    Type: String
+    Description: Production listener, shifted on cutover.
+
+  TestListenerArn:
+    Type: String
+    Description: Test listener, pointed at the new task set before cutover.
+
+  EcsExecutionRoleArn:
+    Type: String
+    Description: Execution role the pipeline passes when registering a task definition.
+
+  EcsTaskRoleArn:
+    Type: String
+    Description: Task role the pipeline passes when registering a task definition.
+
+  TerminationWaitTimeInMinutes:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    MaxValue: 2880
+    Description: >-
+      How long the blue task set survives after traffic has shifted. Ten
+      minutes is enough to notice a problem in the logs and roll back by
+      shifting traffic straight back, rather than waiting out a fresh deploy.
+
+  DeploymentConfigName:
+    Type: String
+    Default: CodeDeployDefault.ECSAllAtOnce
+    AllowedValues:
+      - CodeDeployDefault.ECSAllAtOnce
+      - CodeDeployDefault.ECSLinear10PercentEvery1Minutes
+      - CodeDeployDefault.ECSCanary10Percent5Minutes
+    Description: >-
+      All-at-once for the lab, so a demo deploy finishes in a couple of
+      minutes. A canary configuration is the production default.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # CodeDeploy
+  # ---------------------------------------------------------------------------
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codedeploy-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        # AWS-managed and ECS-specific. Writing this by hand means tracking
+        # every ELB and ECS call CodeDeploy makes during a traffic shift, which
+        # is a maintenance burden with no security gain over the scoped managed
+        # policy.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSCodeDeployRoleForECS"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub "${ProjectName}-app"
+      ComputePlatform: ECS
+
+  DeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "${ProjectName}-dg"
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      DeploymentConfigName: !Ref DeploymentConfigName
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          # Shift as soon as the green task set is healthy. Switch to
+          # STOP_DEPLOYMENT with a wait time if you want a manual approval gate
+          # after checking the test listener.
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: !Ref TerminationWaitTimeInMinutes
+      ECSServices:
+        - ClusterName: !Ref ClusterName
+          ServiceName: !Ref ServiceName
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - TargetGroups:
+              - Name: !Ref TargetGroupBlueName
+              - Name: !Ref TargetGroupGreenName
+            ProdTrafficRoute:
+              ListenerArns:
+                - !Ref ProdListenerArn
+            TestTrafficRoute:
+              ListenerArns:
+                - !Ref TestListenerArn
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_REQUEST
+
+  # ---------------------------------------------------------------------------
+  # Pipeline
+  # ---------------------------------------------------------------------------
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-pipeline-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: run-blue-green-deploys
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactBucketObjects
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:PutObject"
+                Resource: !Sub "${ArtifactBucketArn}/*"
+              - Sid: ArtifactBucketMetadata
+                Effect: Allow
+                Action:
+                  - "s3:GetBucketVersioning"
+                  - "s3:ListBucket"
+                Resource: !Ref ArtifactBucketArn
+              - Sid: ReadSourceImage
+                Effect: Allow
+                Action:
+                  - "ecr:DescribeImages"
+                  - "ecr:BatchGetImage"
+                Resource: !Ref EcrRepositoryArn
+              - Sid: DriveCodeDeploy
+                Effect: Allow
+                Action:
+                  - "codedeploy:CreateDeployment"
+                  - "codedeploy:GetDeployment"
+                  - "codedeploy:GetApplication"
+                  - "codedeploy:GetApplicationRevision"
+                  - "codedeploy:RegisterApplicationRevision"
+                  - "codedeploy:GetDeploymentGroup"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:application:${CodeDeployApplication}"
+                  - !Sub "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${CodeDeployApplication}/${ProjectName}-dg"
+              - Sid: ReadDeploymentConfigs
+                Effect: Allow
+                Action:
+                  - "codedeploy:GetDeploymentConfig"
+                # Deployment configurations are AWS-owned resources named
+                # CodeDeployDefault.*; the ARN is predictable but the action is
+                # read-only metadata, so the wildcard is on the config name
+                # only, not on the service.
+                Resource: !Sub "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentconfig:*"
+              - Sid: RegisterTaskDefinition
+                Effect: Allow
+                Action:
+                  - "ecs:RegisterTaskDefinition"
+                # Resource "*" is required: RegisterTaskDefinition creates a
+                # resource that does not exist yet, so there is no ARN to scope
+                # it to. IAM offers no condition key for the family either.
+                Resource: "*"
+              - Sid: InspectService
+                Effect: Allow
+                Action:
+                  - "ecs:DescribeServices"
+                  - "ecs:DescribeTaskDefinition"
+                Resource: "*"
+                Condition:
+                  # DescribeTaskDefinition takes no resource ARN, so the pair is
+                  # constrained by cluster instead - the pipeline can only look
+                  # at this project's cluster.
+                  ArnEqualsIfExists:
+                    "ecs:cluster": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}"
+              - Sid: PassEcsRoles
+                Effect: Allow
+                Action:
+                  - "iam:PassRole"
+                Resource:
+                  - !Ref EcsExecutionRoleArn
+                  - !Ref EcsTaskRoleArn
+                Condition:
+                  # Narrows the grant to task registration: these roles cannot
+                  # be handed to EC2, Lambda or anything else.
+                  StringEqualsIfExists:
+                    "iam:PassedToService": ecs-tasks.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${ProjectName}-pipeline"
+      # V1 billing is a flat monthly charge per active pipeline; V2 bills per
+      # action-minute and adds features this lab does not use.
+      PipelineType: V1
+      RoleArn: !GetAtt PipelineRole.Arn
+      RestartExecutionOnUpdate: false
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: DeployBundle
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                S3Bucket: !Ref ArtifactBucketName
+                S3ObjectKey: !Ref DeployBundleKey
+                # False on purpose. Both source actions land within seconds of
+                # each other in one build; if S3 polling were left on, the zip
+                # upload would start one execution and the ECR push another,
+                # and the pipeline would deploy the same commit twice. The
+                # EventBridge rule below is the single trigger.
+                PollForSourceChanges: "false"
+              OutputArtifacts:
+                - Name: DeployBundleArtifact
+              RunOrder: 1
+            - Name: ContainerImage
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: ECR
+                Version: "1"
+              Configuration:
+                RepositoryName: !Ref EcrRepositoryName
+                ImageTag: !Ref ImageTag
+              OutputArtifacts:
+                - Name: ImageArtifact
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: BlueGreenDeploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: "1"
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Ref DeploymentGroup
+                TaskDefinitionTemplateArtifact: DeployBundleArtifact
+                TaskDefinitionTemplatePath: taskdef.json
+                AppSpecTemplateArtifact: DeployBundleArtifact
+                AppSpecTemplatePath: appspec.yaml
+                Image1ArtifactName: ImageArtifact
+                # The placeholder string inside taskdef.json, not a container
+                # name: CodePipeline replaces <IMAGE1_NAME> with the image URI
+                # carried in the ECR source artifact.
+                Image1ContainerName: IMAGE1_NAME
+              InputArtifacts:
+                - Name: DeployBundleArtifact
+                - Name: ImageArtifact
+              RunOrder: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # The single trigger: a successful push of the deployed tag to this one
+  # repository.
+  # ---------------------------------------------------------------------------
+  PipelineTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-pipeline-trigger-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: start-this-pipeline-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StartPipeline
+                Effect: Allow
+                Action:
+                  - "codepipeline:StartPipelineExecution"
+                Resource: !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  EcrPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-ecr-push-trigger"
+      Description: Start the delivery pipeline when the deployed tag is pushed.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.ecr
+        detail-type:
+          - ECR Image Action
+        detail:
+          action-type:
+            - PUSH
+          result:
+            - SUCCESS
+          repository-name:
+            - !Ref EcrRepositoryName
+          # Filtered to the deployed tag. Without this the sha-<short> push
+          # from the same build fires a second, identical execution.
+          image-tag:
+            - !Ref ImageTag
+      Targets:
+        - Id: pipeline
+          Arn: !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}"
+          RoleArn: !GetAtt PipelineTriggerRole.Arn
+
+Outputs:
+
+  PipelineName:
+    Description: Delivery pipeline name.
+    Value: !Ref Pipeline
+
+  PipelineUrl:
+    Description: Console link to watch a deployment.
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view?region=${AWS::Region}"
+
+  CodeDeployApplicationName:
+    Description: CodeDeploy application name.
+    Value: !Ref CodeDeployApplication
+
+  DeploymentGroupName:
+    Description: CodeDeploy deployment group name.
+    Value: !Ref DeploymentGroup

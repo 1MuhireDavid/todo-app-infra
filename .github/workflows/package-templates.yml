@@ -1,0 +1,170 @@
+name: Package nested templates
+
+# Lints every template, uploads the nested ones to S3 under a content-addressed
+# key, and writes the resulting hashes back into cfn/deployment-file.yaml.
+#
+# That write is the deploy trigger. CloudFormation Git sync watches this branch
+# and applies the commit this workflow pushes; there is no aws cloudformation
+# deploy step anywhere, and this workflow holds no CloudFormation permissions
+# at all.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "cfn/nested-templates/**"
+      - "cfn/root.yaml"
+      - ".github/workflows/package-templates.yml"
+  workflow_dispatch:
+    inputs:
+      force_upload:
+        description: "Re-upload every template even if the key already exists"
+        type: boolean
+        default: false
+
+# Two runs must never interleave: both write to cfn/deployment-file.yaml and
+# push. cancel-in-progress stays false because an interrupted run can leave the
+# deployment file pointing at a key it never finished uploading.
+concurrency:
+  group: package-templates
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: arn:aws:iam::047719661196:role/todo-app-gha-infra-packaging
+  TEMPLATES_BUCKET: todo-app-cfn-templates-047719661196-us-east-1
+  NESTED_DIR: cfn/nested-templates
+  DEPLOYMENT_FILE: cfn/deployment-file.yaml
+
+jobs:
+  package:
+    name: Lint, package and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The commit this job pushes has to sit on top of the branch tip.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cfn-lint
+        run: pip install --quiet cfn-lint
+
+      # A malformed template uploads to S3 perfectly happily and only fails
+      # hours later at deploy time, by which point the failure looks like a
+      # CloudFormation problem rather than a typo. Lint first, fail the job.
+      - name: Lint templates
+        run: |
+          set -euo pipefail
+          cfn-lint bootstrap/00-bootstrap.yaml cfn/root.yaml "${NESTED_DIR}"/*.yaml
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: package-templates-${{ github.run_id }}
+
+      - name: Package and upload changed templates
+        id: package
+        env:
+          FORCE_UPLOAD: ${{ inputs.force_upload }}
+        run: |
+          set -euo pipefail
+
+          # Every nested template must appear here. A new template added to the
+          # directory without a matching root parameter would otherwise upload
+          # to S3 and simply never be deployed - the silent failure this map
+          # exists to prevent.
+          declare -A HASH_PARAM=(
+            ["01-network.yaml"]="NetworkTemplateHash"
+            ["02-security.yaml"]="SecurityTemplateHash"
+            ["03-vpc-endpoints.yaml"]="VpcEndpointsTemplateHash"
+            ["04-database.yaml"]="DatabaseTemplateHash"
+            ["05-cache.yaml"]="CacheTemplateHash"
+            ["06-alb-ecs.yaml"]="AlbEcsTemplateHash"
+            ["07-cicd-pipeline.yaml"]="CicdTemplateHash"
+          )
+
+          echo "| Template | Hash | Parameter | Action |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          changed=0
+
+          for path in "${NESTED_DIR}"/*.yaml; do
+            name="$(basename "$path")"
+            param="${HASH_PARAM[$name]:-}"
+
+            if [[ -z "$param" ]]; then
+              echo "::error file=${path}::No hash parameter mapped for ${name}. Add it to HASH_PARAM in this workflow and to Parameters in cfn/root.yaml, or it will never be deployed."
+              exit 1
+            fi
+
+            if ! grep -q "^  ${param}:" cfn/root.yaml; then
+              echo "::error file=cfn/root.yaml::${param} is mapped to ${name} but is not declared as a parameter in root.yaml."
+              exit 1
+            fi
+
+            # Content-addressed, per file. A shared version string would change
+            # every TemplateURL on every push and drag all seven nested stacks
+            # through a no-op update, because CloudFormation diffs the URL
+            # string rather than the object behind it.
+            hash="$(git hash-object "$path" | cut -c1-12)"
+            key="templates/${name%.yaml}-${hash}.yaml"
+
+            if [[ "${FORCE_UPLOAD:-false}" != "true" ]] \
+              && aws s3api head-object --bucket "$TEMPLATES_BUCKET" --key "$key" >/dev/null 2>&1; then
+              action="unchanged"
+            else
+              aws s3api put-object \
+                --bucket "$TEMPLATES_BUCKET" \
+                --key "$key" \
+                --body "$path" \
+                --content-type "application/yaml" \
+                --no-cli-pager >/dev/null
+              action="uploaded"
+            fi
+
+            # Rewrite the hash in the deployment file. The anchor is the exact
+            # two-space indented parameter key, so nothing else can match.
+            if ! grep -q "^  ${param}: ${hash}$" "$DEPLOYMENT_FILE"; then
+              sed -i -E "s|^(  ${param}:) .*$|\1 ${hash}|" "$DEPLOYMENT_FILE"
+              changed=1
+            fi
+
+            echo "| ${name} | \`${hash}\` | ${param} | ${action} |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit updated hashes
+        if: steps.package.outputs.changed == '1'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$DEPLOYMENT_FILE"
+          # [skip ci] so this push does not re-enter this workflow. It does not
+          # and must not stop CloudFormation Git sync, which watches the branch
+          # itself rather than Actions - this commit is the deploy.
+          git commit -m "chore: update nested template hashes [skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed updated hashes. CloudFormation Git sync will apply this commit." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report no-op
+        if: steps.package.outputs.changed != '1'
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "No template content changed - deployment file left untouched and no deploy triggered." >> "$GITHUB_STEP_SUMMARY"

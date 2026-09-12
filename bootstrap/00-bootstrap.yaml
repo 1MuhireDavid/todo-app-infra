@@ -1,0 +1,499 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Bootstrap stack for the To-Do lab. Owns the long-lived artifacts that must
+  outlive the application stack: the CloudFormation templates bucket, the ECR
+  repository, the CodePipeline artifact bucket, and the two GitHub OIDC roles.
+  Deployed once, by hand, before anything else. Everything here is consumed by
+  the application root stack through Fn::ImportValue.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Default: todo-app
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+    Description: >-
+      Name prefix for every resource in every stack. Lowercase because it also
+      becomes the ECR repository name, which does not accept uppercase.
+
+  GitHubOwner:
+    Type: String
+    Default: 1MuhireDavid
+    Description: GitHub org or username that owns both repositories.
+
+  InfraRepoName:
+    Type: String
+    Default: todo-app-infra
+    Description: Repository holding the CloudFormation templates.
+
+  AppRepoName:
+    Type: String
+    Default: todo-app
+    Description: Repository holding the Spring Boot application.
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: >-
+      The only branch allowed to assume either role. Both trust policies pin
+      the ref claim to this branch.
+
+  InfraWorkflowFile:
+    Type: String
+    Default: package-templates.yml
+    Description: >-
+      Workflow filename in the infra repo allowed to assume the infra role.
+      Used to build the job_workflow_ref claim, which is what actually pins the
+      trust to one file rather than to the whole repository.
+
+  AppWorkflowFile:
+    Type: String
+    Default: build-and-push.yml
+    Description: Workflow filename in the app repo allowed to assume the app role.
+
+  CreateOIDCProvider:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Set to "true" only in an account that has never had the GitHub Actions
+      OIDC provider created. An account holds exactly one provider per URL, so
+      a second AWS::IAM::OIDCProvider fails with EntityAlreadyExists.
+
+  RootStackName:
+    Type: String
+    Default: todo-app
+    Description: >-
+      Name the application root stack will be given. Used only to scope the app
+      build role to describe-stacks on that one stack, which is how the build
+      workflow fills the account-specific ARNs and endpoints into taskdef.json
+      instead of having them committed to the application repository.
+
+  ImagesToRetain:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 50
+    Description: >-
+      How many sha- tagged images the ECR lifecycle policy keeps. Low on
+      purpose: every image is billed for storage and the lab only ever needs to
+      roll back a deployment or two.
+
+  TemplateRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: >-
+      Days before a non-current template object version expires. Templates are
+      content-addressed, so superseded versions are only ever noise.
+
+Conditions:
+
+  ShouldCreateOIDCProvider: !Equals
+    - !Ref CreateOIDCProvider
+    - "true"
+
+Mappings:
+
+  # ALB access logging in regions launched before August 2022 is delivered by a
+  # per-region AWS-owned account rather than by a service principal, and
+  # us-east-1 is one of those regions. Newer regions use the principal
+  # logdelivery.elasticloadbalancing.amazonaws.com, which is why this is a
+  # mapping and not a hardcoded ARN.
+  RegionToELBAccount:
+    us-east-1:
+      AccountId: "127311923021"
+    us-east-2:
+      AccountId: "033677994240"
+    us-west-1:
+      AccountId: "027434742980"
+    us-west-2:
+      AccountId: "797873946194"
+    eu-west-1:
+      AccountId: "156460612806"
+    eu-central-1:
+      AccountId: "054676820928"
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Templates bucket - holds the packaged nested templates uploaded by CI.
+  # Retained on stack delete: deleting the bootstrap stack must never destroy
+  # the artifacts needed to redeploy the application stack.
+  # ---------------------------------------------------------------------------
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-cfn-templates-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldTemplateVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref TemplateRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  TemplatesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TemplatesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt TemplatesBucket.Arn
+              - !Sub "${TemplatesBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # ---------------------------------------------------------------------------
+  # Pipeline artifact bucket - CodePipeline artifacts, the appspec/taskdef zip
+  # pushed by the app repo, and ALB access logs under their own prefix.
+  #
+  # This lives in the bootstrap stack rather than in 07-cicd-pipeline.yaml for
+  # two reasons:
+  #   1. The ALB in 06 needs the bucket for access logs, but 07 has to be
+  #      created after 06 because CodeDeploy needs the service, target groups
+  #      and listeners. Owning the bucket here breaks that cycle.
+  #   2. The app repo OIDC role is defined here, so its upload permission can be
+  #      scoped to a real bucket ARN instead of a name guessed with Fn::Sub.
+  #
+  # Explicitly Delete, unlike the two retained resources above: nothing in here
+  # cannot be regenerated by re-running the pipeline. See the teardown section
+  # of the README - the bucket must be emptied first or the delete hangs.
+  # ---------------------------------------------------------------------------
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${ProjectName}-pipeline-artifacts-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          # AES256 rather than KMS: ALB access log delivery supports SSE-S3 only.
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpirePipelineArtifacts
+            Status: Enabled
+            # No prefix: this covers both the uploaded deploy bundle under
+            # source/ and the artifacts CodePipeline writes under its own
+            # pipeline-name prefix. Where it overlaps the ALB log rule below,
+            # S3 applies the shorter expiration.
+            Prefix: ""
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireAlbAccessLogs
+            Status: Enabled
+            Prefix: "alb-access-logs/"
+            ExpirationInDays: 14
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: AllowAlbAccessLogDelivery
+            Effect: Allow
+            Principal:
+              AWS: !Sub
+                - "arn:${AWS::Partition}:iam::${ElbAccountId}:root"
+                - ElbAccountId: !FindInMap
+                    - RegionToELBAccount
+                    - !Ref AWS::Region
+                    - AccountId
+            Action: "s3:PutObject"
+            Resource: !Sub "${ArtifactBucket.Arn}/alb-access-logs/AWSLogs/${AWS::AccountId}/*"
+
+  # ---------------------------------------------------------------------------
+  # ECR repository. Retained for the same reason as the templates bucket: with
+  # no NAT gateway the tasks cannot pull from a public registry, so losing this
+  # repository means the application stack can never start again.
+  # ---------------------------------------------------------------------------
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref ProjectName
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        # Block literal rather than a one-line string so the JSON stays
+        # reviewable in a diff. Untagged images are expired first because a
+        # re-push of the latest tag orphans the previous image immediately.
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images orphaned by a latest re-push",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep only the most recent sha- tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImagesToRetain}
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # GitHub OIDC federation. No long-lived access key exists anywhere in this
+  # project; both workflows exchange a short-lived GitHub token for STS
+  # credentials.
+  # ---------------------------------------------------------------------------
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
+    Properties:
+      Url: "https://token.actions.githubusercontent.com"
+      ClientIdList:
+        - sts.amazonaws.com
+      # IAM no longer verifies thumbprints for this provider, but the API still
+      # requires the list to be non-empty.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Role for the infra repo packaging workflow. It only uploads packaged nested
+  # templates and holds no CloudFormation permissions at all, because the deploy
+  # itself is performed by CloudFormation Git sync, not by CI.
+  InfraPackagingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-gha-infra-packaging"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                # aud: the token was minted for STS and not for some other audience.
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+                # repository and ref: right repository, right branch.
+                "token.actions.githubusercontent.com:repository": !Sub "${GitHubOwner}/${InfraRepoName}"
+                "token.actions.githubusercontent.com:ref": !Sub "refs/heads/${GitHubBranch}"
+                # job_workflow_ref is the claim that actually matters. Without
+                # it, any workflow file in the repository can assume this role,
+                # including one added on a branch that later merges. With it,
+                # only this one file at this one ref can.
+                "token.actions.githubusercontent.com:job_workflow_ref": !Sub "${GitHubOwner}/${InfraRepoName}/.github/workflows/${InfraWorkflowFile}@refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: publish-nested-templates
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListTemplatesBucket
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                Resource: !GetAtt TemplatesBucket.Arn
+              - Sid: PublishTemplateObjects
+                Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                Resource: !Sub "${TemplatesBucket.Arn}/templates/*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Role for the app repo build/push workflow: push an image, drop the
+  # appspec/taskdef bundle in the artifact bucket. It deliberately cannot start
+  # the pipeline - the EventBridge rule does that, on the ECR push event.
+  AppBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-gha-app-build"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+                "token.actions.githubusercontent.com:repository": !Sub "${GitHubOwner}/${AppRepoName}"
+                "token.actions.githubusercontent.com:ref": !Sub "refs/heads/${GitHubBranch}"
+                "token.actions.githubusercontent.com:job_workflow_ref": !Sub "${GitHubOwner}/${AppRepoName}/.github/workflows/${AppWorkflowFile}@refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: push-image-and-deploy-bundle
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                # Resource "*" is required here: GetAuthorizationToken is an
+                # account-level call that takes no repository and rejects any
+                # resource ARN. There is no narrower form of this statement.
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:CompleteLayerUpload"
+                  - "ecr:InitiateLayerUpload"
+                  - "ecr:PutImage"
+                  - "ecr:UploadLayerPart"
+                  - "ecr:BatchGetImage"
+                  - "ecr:DescribeImages"
+                Resource: !GetAtt EcrRepository.Arn
+              - Sid: UploadDeployBundle
+                Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                Resource: !Sub "${ArtifactBucket.Arn}/source/*"
+              - Sid: ReadInfrastructureOutputs
+                Effect: Allow
+                Action:
+                  - "cloudformation:DescribeStacks"
+                # Read-only, and scoped to the one root stack. The workflow uses
+                # this to resolve the execution role ARN, the proxy and Redis
+                # endpoints and the two secret ARNs when it renders taskdef.json
+                # - values that are generated, not guessable, and that nobody
+                # should be pasting into the application repository by hand.
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${RootStackName}/*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+
+  TemplatesBucketName:
+    Description: Bucket holding the packaged nested templates.
+    Value: !Ref TemplatesBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-TemplatesBucketName"
+
+  TemplatesBucketArn:
+    Description: ARN of the templates bucket.
+    Value: !GetAtt TemplatesBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TemplatesBucketArn"
+
+  ArtifactBucketName:
+    Description: Pipeline artifact bucket, also the ALB access log target.
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketName"
+
+  ArtifactBucketArn:
+    Description: ARN of the pipeline artifact bucket.
+    Value: !GetAtt ArtifactBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketArn"
+
+  EcrRepositoryName:
+    Description: ECR repository name, used by the pipeline ECR source action.
+    Value: !Ref EcrRepository
+    Export:
+      Name: !Sub "${AWS::StackName}-EcrRepositoryName"
+
+  EcrRepositoryArn:
+    Description: ECR repository ARN.
+    Value: !GetAtt EcrRepository.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EcrRepositoryArn"
+
+  EcrRepositoryUri:
+    Description: ECR repository URI, used to build the task definition image.
+    Value: !GetAtt EcrRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-EcrRepositoryUri"
+
+  InfraPackagingRoleArn:
+    Description: Role assumed by the infra repo packaging workflow.
+    Value: !GetAtt InfraPackagingRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-InfraPackagingRoleArn"
+
+  AppBuildRoleArn:
+    Description: Role assumed by the app repo build/push workflow.
+    Value: !GetAtt AppBuildRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AppBuildRoleArn"

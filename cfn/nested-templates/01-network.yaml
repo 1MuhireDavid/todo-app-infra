@@ -1,0 +1,400 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Network tier: one VPC across two availability zones with four dedicated
+  subnet tiers - public for the ALB, app private for the Fargate tasks, data
+  private for the RDS instance and the RDS Proxy ENIs, cache private for the
+  ElastiCache nodes. No NAT gateway anywhere; all AWS-service egress is handled
+  by the VPC endpoints in 03-vpc-endpoints.yaml.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Description: Name prefix and Project tag value for every resource.
+
+  VpcCidr:
+    Type: String
+    Default: "10.40.0.0/16"
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+    Description: >-
+      /16 for the whole lab. 10.40 is deliberately far from the 10.0 default so
+      a future peering with another lab VPC does not collide.
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: "10.40.0.0/24"
+    Description: Public subnet in AZ A - ALB only.
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: "10.40.1.0/24"
+    Description: Public subnet in AZ B - ALB only.
+
+  AppSubnet1Cidr:
+    Type: String
+    Default: "10.40.10.0/24"
+    Description: App private subnet in AZ A - ECS Fargate tasks.
+
+  AppSubnet2Cidr:
+    Type: String
+    Default: "10.40.11.0/24"
+    Description: App private subnet in AZ B - ECS Fargate tasks.
+
+  DataSubnet1Cidr:
+    Type: String
+    Default: "10.40.20.0/24"
+    Description: Data private subnet in AZ A - RDS instance and RDS Proxy ENIs.
+
+  DataSubnet2Cidr:
+    Type: String
+    Default: "10.40.21.0/24"
+    Description: Data private subnet in AZ B - RDS instance and RDS Proxy ENIs.
+
+  CacheSubnet1Cidr:
+    Type: String
+    Default: "10.40.30.0/24"
+    Description: Cache private subnet in AZ A - ElastiCache nodes.
+
+  CacheSubnet2Cidr:
+    Type: String
+    Default: "10.40.31.0/24"
+    Description: Cache private subnet in AZ B - ElastiCache nodes.
+
+Resources:
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      # Both are required for interface VPC endpoints to resolve to their
+      # private IPs, which is the only way the tasks reach ECR, Secrets Manager,
+      # STS and CloudWatch Logs without a NAT gateway.
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ---------------------------------------------------------------------------
+  # Public tier - the ALB and nothing else.
+  # ---------------------------------------------------------------------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      # The ALB gets its public addresses from the load balancer itself, so
+      # nothing launched here needs an auto-assigned public IP.
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
+        - Key: Tier
+          Value: public
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
+        - Key: Tier
+          Value: public
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rt-public"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    # The gateway has to be attached before a route can target it, and
+    # CloudFormation cannot infer that from the Ref alone.
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------------------------------------------------------------------------
+  # App tier - Fargate tasks. Private, no public IP, no default route.
+  # ---------------------------------------------------------------------------
+  AppSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref AppSubnet1Cidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-app-1"
+        - Key: Tier
+          Value: app
+        - Key: Project
+          Value: !Ref ProjectName
+
+  AppSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref AppSubnet2Cidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-app-2"
+        - Key: Tier
+          Value: app
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Data tier - RDS instance and RDS Proxy ENIs.
+  # ---------------------------------------------------------------------------
+  DataSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref DataSubnet1Cidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-data-1"
+        - Key: Tier
+          Value: data
+        - Key: Project
+          Value: !Ref ProjectName
+
+  DataSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref DataSubnet2Cidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-data-2"
+        - Key: Tier
+          Value: data
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Cache tier - ElastiCache nodes.
+  # ---------------------------------------------------------------------------
+  CacheSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref CacheSubnet1Cidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-cache-1"
+        - Key: Tier
+          Value: cache
+        - Key: Project
+          Value: !Ref ProjectName
+
+  CacheSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref CacheSubnet2Cidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-cache-2"
+        - Key: Tier
+          Value: cache
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Private route tables, one per AZ, shared by all three private tiers in that
+  # AZ. Without a NAT gateway the three tiers have identical routing - local
+  # plus the S3 gateway endpoint prefix list - so a table per tier would be six
+  # identical tables. Keeping them per-AZ still means an AZ-local NAT or
+  # firewall endpoint can be introduced later without touching the other AZ.
+  # Production note: the moment the tiers need different egress (a NAT for the
+  # app tier only, say), split these into one table per tier per AZ.
+  # ---------------------------------------------------------------------------
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rt-private-1"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rt-private-2"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  AppSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  AppSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  DataSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DataSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  DataSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DataSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  CacheSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref CacheSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  CacheSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref CacheSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+Outputs:
+
+  VpcId:
+    Description: VPC id.
+    Value: !Ref Vpc
+
+  VpcCidr:
+    Description: VPC CIDR, used by security group rules that must stay in-VPC.
+    Value: !GetAtt Vpc.CidrBlock
+
+  PublicSubnetIds:
+    Description: Public subnet ids, ALB only.
+    Value: !Join
+      - ","
+      - - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  AppSubnetIds:
+    Description: App private subnet ids, Fargate tasks.
+    Value: !Join
+      - ","
+      - - !Ref AppSubnet1
+        - !Ref AppSubnet2
+
+  DataSubnetIds:
+    Description: Data private subnet ids, RDS instance and proxy.
+    Value: !Join
+      - ","
+      - - !Ref DataSubnet1
+        - !Ref DataSubnet2
+
+  CacheSubnetIds:
+    Description: Cache private subnet ids, ElastiCache.
+    Value: !Join
+      - ","
+      - - !Ref CacheSubnet1
+        - !Ref CacheSubnet2
+
+  EndpointSubnetIds:
+    Description: >-
+      Subnets that receive the interface endpoint ENIs. App subnets only: an
+      interface endpoint accepts exactly one subnet per availability zone, so
+      the data tier cannot get its own ENI. It does not need one - private DNS
+      resolves the endpoint VPC-wide and the data subnets route to the app
+      subnets locally, so what actually gates the RDS Proxy is the security
+      group rule in 02-security.yaml, not ENI placement.
+    Value: !Join
+      - ","
+      - - !Ref AppSubnet1
+        - !Ref AppSubnet2
+
+  PrivateRouteTableIds:
+    Description: Private route tables that need the S3 gateway endpoint route.
+    Value: !Join
+      - ","
+      - - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2

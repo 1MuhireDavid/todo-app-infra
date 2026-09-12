@@ -1,0 +1,81 @@
+# CloudFormation Git sync deployment file for the application root stack.
+#
+# This file is the deploy. Git sync watches the branch, and every commit that
+# changes it triggers a stack update with exactly these parameters and tags -
+# reviewable in a pull request, versioned in git, and never typed into a
+# console form.
+#
+# The seven *TemplateHash values are maintained by
+# .github/workflows/package-templates.yml. It hashes each nested template,
+# uploads any that changed, writes the new hashes here and pushes the result
+# with [skip ci]. That push is what Git sync picks up; there is no manual
+# apply step anywhere in the loop.
+#
+# Do not hand-edit the hashes. If they drift from what is in S3 the stack
+# update fails at template fetch, which is a confusing way to find out.
+
+template-file-path: cfn/root.yaml
+
+parameters:
+  ProjectName: todo-app
+  BootstrapStackName: todo-app-bootstrap
+
+  # Managed by package-templates.yml
+  NetworkTemplateHash: d03fedde6dc4
+  SecurityTemplateHash: 007dadfe632b
+  VpcEndpointsTemplateHash: b04c3b3d25db
+  DatabaseTemplateHash: 033963922f91
+  CacheTemplateHash: 4b3d878cdd21
+  AlbEcsTemplateHash: 4deb1182fc5a
+  CicdTemplateHash: 5423f22060db
+
+  # Network
+  VpcCidr: 10.40.0.0/16
+  PublicSubnet1Cidr: 10.40.0.0/24
+  PublicSubnet2Cidr: 10.40.1.0/24
+  AppSubnet1Cidr: 10.40.10.0/24
+  AppSubnet2Cidr: 10.40.11.0/24
+  DataSubnet1Cidr: 10.40.20.0/24
+  DataSubnet2Cidr: 10.40.21.0/24
+  CacheSubnet1Cidr: 10.40.30.0/24
+  CacheSubnet2Cidr: 10.40.31.0/24
+
+  # Ports and access
+  ContainerPort: 8080
+  TestListenerPort: 9000
+  # Wide open so the green task set can be checked from anywhere during the
+  # demo. Narrow to a single address for anything that is not a lab.
+  TestListenerCidr: 0.0.0.0/0
+
+  # Database - no credential here, and there never will be. RDS generates the
+  # master password into Secrets Manager and the templates only pass its ARN.
+  DatabaseName: todoapp
+  MasterUsername: todoadmin
+  DBInstanceClass: db.t3.micro
+  DatabaseEngineVersion: "16"
+  MultiAZ: "false"
+  BackupRetentionPeriod: 1
+
+  # Cache - 1 replica is what makes the group Multi-AZ, at double the node cost
+  CacheNodeType: cache.t4g.micro
+  CacheReplicaCount: 1
+  CacheTtlSeconds: 60
+
+  # Compute
+  ImageTag: latest
+  TaskCpu: "512"
+  TaskMemory: "1024"
+  DesiredCount: 1
+  MinCapacity: 1
+  MaxCapacity: 4
+  CpuTargetValue: 60
+  LogRetentionDays: 14
+
+  # Delivery
+  TerminationWaitTimeInMinutes: 10
+  DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+
+tags:
+  Project: todo-app
+  Environment: lab
+  ManagedBy: cloudformation-git-sync

@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  VPC endpoints. This stack is what replaces the NAT gateway: every AWS API the
+  tasks and the RDS Proxy need is reached over a private ENI or the S3 gateway
+  prefix list, and nothing in the private subnets has a route to the internet.
+
+# -----------------------------------------------------------------------------
+# Cost, stated honestly, because the usual claim about this pattern is wrong at
+# this scale. An interface endpoint is billed per AZ-hour, so five endpoints
+# across two AZs is ten ENIs at about 0.01 USD an hour - roughly 73 USD a month,
+# against roughly 33 USD for one NAT gateway. This is the largest single line
+# item in the lab and it is MORE expensive than the thing it replaces.
+#
+# It is here because it is tighter, not because it is cheaper: with no NAT there
+# is no route from a private subnet to the internet at all, so a compromised
+# task cannot call out to anything that is not one of these five APIs.
+#
+# If cost matters more than that property, the levers in order are: drop the sts
+# endpoint (Fargate does not need it - only an application calling STS directly
+# does), place the endpoints in one AZ rather than two, or go back to a single
+# NAT gateway. See the cost section of the README.
+# -----------------------------------------------------------------------------
+
+Parameters:
+
+  # No ProjectName parameter here, unlike every other nested stack:
+  # AWS::EC2::VPCEndpoint exposes no Tags property and every resource in this
+  # stack is an endpoint, so there is nothing to name or tag from a prefix.
+  # The Project tag still lands on these, because CloudFormation propagates
+  # stack-level tags - set in cfn/deployment-file.yaml - to any resource whose
+  # API supports tagging, and the endpoint API does.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC that hosts the endpoints.
+
+  EndpointSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      One subnet per availability zone for the interface ENIs - the app
+      subnets. An interface endpoint rejects two subnets in the same AZ.
+
+  PrivateRouteTableIds:
+    Type: CommaDelimitedList
+    Description: Every private route table that needs the S3 gateway route.
+
+  VpcEndpointSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group applied to all interface endpoint ENIs.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # ECR needs both endpoints plus S3. api handles authorization and manifest
+  # calls, dkr handles the Docker registry protocol, and the layers themselves
+  # are served from S3 - a pull fails with an opaque timeout if any one of the
+  # three is missing.
+  # ---------------------------------------------------------------------------
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcId: !Ref VpcId
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref EndpointSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcId: !Ref VpcId
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref EndpointSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcId: !Ref VpcId
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref EndpointSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      # The Fargate agent calls STS to assume the task and execution roles.
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+      VpcId: !Ref VpcId
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref EndpointSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      # Used twice: by the ECS execution role when it injects the task
+      # secrets, and by the RDS Proxy when it reads the RDS-managed master
+      # secret.
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      VpcId: !Ref VpcId
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref EndpointSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+
+  # ---------------------------------------------------------------------------
+  # Gateway endpoint - a route table entry, not an ENI, so it is free and needs
+  # no security group. Attached to every private route table.
+  # ---------------------------------------------------------------------------
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcId: !Ref VpcId
+      VpcEndpointType: Gateway
+      RouteTableIds: !Ref PrivateRouteTableIds
+
+Outputs:
+
+  EcrApiEndpointId:
+    Description: ECR API interface endpoint.
+    Value: !Ref EcrApiEndpoint
+
+  EcrDkrEndpointId:
+    Description: ECR Docker registry interface endpoint.
+    Value: !Ref EcrDkrEndpoint
+
+  CloudWatchLogsEndpointId:
+    Description: CloudWatch Logs interface endpoint.
+    Value: !Ref CloudWatchLogsEndpoint
+
+  StsEndpointId:
+    Description: STS interface endpoint.
+    Value: !Ref StsEndpoint
+
+  SecretsManagerEndpointId:
+    Description: Secrets Manager interface endpoint.
+    Value: !Ref SecretsManagerEndpoint
+
+  S3GatewayEndpointId:
+    Description: S3 gateway endpoint, required for ECR layer downloads.
+    Value: !Ref S3GatewayEndpoint

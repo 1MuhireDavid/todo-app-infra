@@ -1,0 +1,608 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Compute tier: public ALB with a production and a test listener, blue and
+  green target groups, an ECS Fargate cluster, the initial task definition, the
+  service under CodeDeploy control, and target-tracking autoscaling.
+
+  Note on ownership of the task definition. The service uses the CODE_DEPLOY
+  deployment controller, and CloudFormation cannot update TaskDefinition,
+  LoadBalancers or NetworkConfiguration on such a service. The task definition
+  below is therefore the bootstrap revision only - the one the service is born
+  with. From the first pipeline run onwards the live revision comes from
+  ecs/taskdef.json in the application repository, which is where a change to
+  the container shape belongs. Keep the two in step: this file defines what the
+  roles, log group and secret wiring must look like, and taskdef.json restates
+  it for the deploy.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Description: Name prefix and Project tag value for every resource.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC hosting the load balancer and the tasks.
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the ALB.
+
+  AppSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: App-tier private subnets for the Fargate tasks.
+
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: ALB security group.
+
+  EcsTaskSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Task security group.
+
+  ArtifactBucketName:
+    Type: String
+    Description: >-
+      Bucket receiving ALB access logs, under its own prefix. Created by the
+      bootstrap stack, which also carries the log delivery bucket policy.
+
+  EcrRepositoryUri:
+    Type: String
+    Description: ECR repository URI for the application image.
+
+  EcrRepositoryArn:
+    Type: String
+    Description: ECR repository ARN, for scoping the execution role pull permission.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: >-
+      Tag used for the bootstrap revision only. An image with this tag must
+      already exist in ECR before this stack is created - there is no NAT
+      gateway, so a task cannot fall back to a public registry image.
+
+  ContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the Spring Boot container listens on.
+
+  TestListenerPort:
+    Type: Number
+    Default: 9000
+    Description: ALB test listener port, used by CodeDeploy for the green task set.
+
+  TaskCpu:
+    Type: String
+    Default: "512"
+    AllowedValues:
+      - "256"
+      - "512"
+      - "1024"
+    Description: Fargate task CPU units. Quoted - CloudFormation wants a string here.
+
+  TaskMemory:
+    Type: String
+    Default: "1024"
+    AllowedValues:
+      - "512"
+      - "1024"
+      - "2048"
+    Description: >-
+      Fargate task memory in MiB. Must be a legal pairing with TaskCpu: 512 CPU
+      units allows 1024 through 4096 MiB. A JVM under 1 GiB spends its life in
+      GC, which is why this is not the minimum.
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: Task count the service starts with.
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: Autoscaling floor.
+
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    Description: Autoscaling ceiling.
+
+  CpuTargetValue:
+    Type: Number
+    Default: 60
+    MinValue: 10
+    MaxValue: 90
+    Description: Target average CPU percentage for the tracking policy.
+
+  ScaleOutCooldown:
+    Type: Number
+    Default: 60
+    Description: >-
+      Seconds before another scale-out. Short: being slow to add capacity is
+      what users notice.
+
+  ScaleInCooldown:
+    Type: Number
+    Default: 300
+    Description: >-
+      Seconds before another scale-in. Five times the scale-out cooldown, so a
+      brief dip in traffic does not remove a task that is about to be needed
+      again. Asymmetric on purpose.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues:
+      - 1
+      - 3
+      - 7
+      - 14
+      - 30
+      - 90
+    Description: CloudWatch Logs retention.
+
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: >-
+      Endpoint the ALB polls. The application answers this without touching
+      PostgreSQL or Redis, so a database blip does not cause the load balancer
+      to kill healthy tasks.
+
+  DeregistrationDelay:
+    Type: Number
+    Default: 30
+    MinValue: 0
+    MaxValue: 3600
+    Description: >-
+      Seconds the ALB keeps draining a removed target. The default is 300,
+      which makes every blue/green deploy feel five minutes slower than it is.
+
+  DatabaseProxyEndpoint:
+    Type: String
+    Description: RDS Proxy endpoint. The application never sees the instance endpoint.
+
+  DatabasePort:
+    Type: Number
+    Default: 5432
+    Description: PostgreSQL port.
+
+  DatabaseName:
+    Type: String
+    Description: Database name.
+
+  DatabaseSecretArn:
+    Type: String
+    Description: >-
+      RDS-managed master secret ARN. Read by the execution role at task start,
+      never by the task role.
+
+  RedisEndpoint:
+    Type: String
+    Description: ElastiCache primary endpoint address.
+
+  RedisPort:
+    Type: Number
+    Default: 6379
+    Description: Redis port.
+
+  RedisAuthSecretArn:
+    Type: String
+    Description: Redis AUTH token secret ARN.
+
+  CacheTtlSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 5
+    Description: >-
+      TTL on cached task list entries. Short, so a stale cache after a missed
+      invalidation corrects itself within a minute.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Created explicitly rather than letting the awslogs driver auto-create it.
+  # An auto-created ECS log group has infinite retention and quietly bills for
+  # it forever.
+  # ---------------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-cluster"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Two roles, deliberately not one.
+  #
+  # The execution role belongs to the Fargate agent: it pulls the image, writes
+  # the log stream, and resolves the two secrets before the container starts.
+  #
+  # The task role belongs to the application process. The application calls no
+  # AWS API at all - it talks to PostgreSQL and Redis over TCP - so this role
+  # holds no policies. That is the point: the running container cannot read its
+  # own database secret, so an RCE in the application does not hand over the
+  # credential, only the already-injected environment.
+  # ---------------------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: pull-image-log-and-read-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrAuth
+                Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                # Resource "*" is required: this is an account-level call that
+                # takes no repository argument and rejects any ARN.
+                Resource: "*"
+              - Sid: EcrPull
+                Effect: Allow
+                Action:
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:BatchGetImage"
+                Resource: !Ref EcrRepositoryArn
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "${LogGroup.Arn}:*"
+              - Sid: ReadContainerSecrets
+                Effect: Allow
+                Action:
+                  - "secretsmanager:GetSecretValue"
+                Resource:
+                  - !Ref DatabaseSecretArn
+                  - !Ref RedisAuthSecretArn
+              - Sid: DecryptViaSecretsManager
+                Effect: Allow
+                Action:
+                  - "kms:Decrypt"
+                # Same reasoning as the RDS Proxy role in 04: the AWS-managed
+                # aws/secretsmanager key ARN is not resolvable at template time,
+                # and the ViaService condition is what constrains the grant.
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      # No Policies block. The application needs no AWS permissions, and an
+      # empty role is a stronger statement than a role with a token policy.
+      # If the application later needs, say, S3 uploads, that permission is
+      # added here - never to the execution role.
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-task"
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: !Ref ProjectName
+          Image: !Sub "${EcrRepositoryUri}:${ImageTag}"
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          # Non-secret configuration only. Every value here is discoverable
+          # from the console anyway - endpoints, ports, a database name.
+          Environment:
+            - Name: SERVER_PORT
+              Value: !Ref ContainerPort
+            - Name: DB_HOST
+              Value: !Ref DatabaseProxyEndpoint
+            - Name: DB_PORT
+              Value: !Ref DatabasePort
+            - Name: DB_NAME
+              Value: !Ref DatabaseName
+            - Name: REDIS_HOST
+              Value: !Ref RedisEndpoint
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: CACHE_TTL_SECONDS
+              Value: !Ref CacheTtlSeconds
+          # Credentials only, resolved by the execution role at task start and
+          # never visible in the console, in describe-task-definition output,
+          # or in this repository. The trailing ::  selects the current version
+          # and stage of the named JSON key.
+          Secrets:
+            - Name: DB_USERNAME
+              ValueFrom: !Sub "${DatabaseSecretArn}:username::"
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub "${DatabaseSecretArn}:password::"
+            - Name: REDIS_AUTH_TOKEN
+              ValueFrom: !Sub "${RedisAuthSecretArn}:authToken::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Load balancer. HTTP only - the lab has no domain and so no ACM certificate;
+  # production terminates TLS on 443 and redirects 80 to it.
+  # ---------------------------------------------------------------------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroupId
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref ArtifactBucketName
+        - Key: access_logs.s3.prefix
+          Value: alb-access-logs
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  TargetGroupBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-blue"
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      # ip, not instance: awsvpc tasks register by ENI address.
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: !Ref DeregistrationDelay
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  TargetGroupGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-green"
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: !Ref DeregistrationDelay
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ProdListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupBlue
+
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      # CodeDeploy points this at whichever group is currently green, so the
+      # new task set can be exercised before any production traffic shifts.
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref TestListenerPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupGreen
+
+  Service:
+    Type: AWS::ECS::Service
+    # The target group has to be attached to a listener before ECS will accept
+    # it in a service; CloudFormation cannot infer that from the Ref to the
+    # target group alone, so the ordering has to be stated.
+    DependsOn:
+      - ProdListener
+      - TestListener
+    Properties:
+      ServiceName: !Sub "${ProjectName}-service"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      PlatformVersion: LATEST
+      DeploymentController:
+        # CodeDeploy owns task definition rollout from here on, so a pipeline
+        # deploy and a stack update cannot fight over the service.
+        Type: CODE_DEPLOY
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # No public IP, and the subnets have no internet route. Everything
+          # the task needs is behind a VPC endpoint or in the VPC.
+          AssignPublicIp: DISABLED
+          Subnets: !Ref AppSubnetIds
+          SecurityGroups:
+            - !Ref EcsTaskSecurityGroupId
+      LoadBalancers:
+        - ContainerName: !Ref ProjectName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroupBlue
+      HealthCheckGracePeriodSeconds: 60
+      # Would need the ssmmessages interface endpoints as well; not worth the
+      # two extra endpoints for the lab. Turn on with those endpoints when you
+      # need a shell in a running task.
+      EnableExecuteCommand: false
+      PropagateTags: SERVICE
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Autoscaling. No RoleARN: Application Auto Scaling uses its service-linked
+  # role, which it creates on first use.
+  # ---------------------------------------------------------------------------
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: "ecs:service:DesiredCount"
+      ResourceId: !Sub
+        - "service/${ClusterName}/${ServiceName}"
+        - ClusterName: !Ref Cluster
+          ServiceName: !GetAtt Service.Name
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+
+  CpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-cpu-target-tracking"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref CpuTargetValue
+        ScaleOutCooldown: !Ref ScaleOutCooldown
+        ScaleInCooldown: !Ref ScaleInCooldown
+        DisableScaleIn: false
+
+Outputs:
+
+  LoadBalancerDnsName:
+    Description: Public hostname of the application.
+    Value: !GetAtt LoadBalancer.DNSName
+
+  ApplicationUrl:
+    Description: Paste this into a browser once the stack is complete.
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+
+  TestListenerUrl:
+    Description: Green task set during a deployment, before traffic shifts.
+    Value: !Sub "http://${LoadBalancer.DNSName}:${TestListenerPort}"
+
+  ClusterName:
+    Description: ECS cluster name.
+    Value: !Ref Cluster
+
+  ServiceName:
+    Description: ECS service name.
+    Value: !GetAtt Service.Name
+
+  TargetGroupBlueName:
+    Description: Blue target group name, for the CodeDeploy deployment group.
+    Value: !GetAtt TargetGroupBlue.TargetGroupName
+
+  TargetGroupGreenName:
+    Description: Green target group name, for the CodeDeploy deployment group.
+    Value: !GetAtt TargetGroupGreen.TargetGroupName
+
+  ProdListenerArn:
+    Description: Production listener ARN, shifted by CodeDeploy.
+    Value: !Ref ProdListener
+
+  TestListenerArn:
+    Description: Test listener ARN, shifted by CodeDeploy.
+    Value: !Ref TestListener
+
+  TaskDefinitionArn:
+    Description: Bootstrap task definition revision.
+    Value: !Ref TaskDefinition
+
+  ExecutionRoleArn:
+    Description: Execution role ARN, restated in the application taskdef.json.
+    Value: !GetAtt ExecutionRole.Arn
+
+  TaskRoleArn:
+    Description: Task role ARN, restated in the application taskdef.json.
+    Value: !GetAtt TaskRole.Arn
+
+  ContainerName:
+    Description: Container name CodeDeploy replaces the image on.
+    Value: !Ref ProjectName
+
+  LogGroupName:
+    Description: CloudWatch log group for the tasks.
+    Value: !Ref LogGroup

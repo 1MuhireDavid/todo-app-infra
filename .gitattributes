@@ -1,0 +1,6 @@
+# Template hashes are computed with git hash-object over the file bytes, so a
+# CRLF checkout on Windows would produce a different hash from the Linux runner
+# and the deployment file would flap on every push. Pin the line endings.
+* text=auto eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
