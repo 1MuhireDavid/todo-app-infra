@@ -67,7 +67,7 @@ jobs:
       - name: Lint templates
         run: |
           set -euo pipefail
-          cfn-lint bootstrap/00-bootstrap.yaml cfn/root.yaml "${NESTED_DIR}"/*.yaml
+          cfn-lint cfn/root.yaml "${NESTED_DIR}"/*.yaml
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

@@ -18,9 +18,6 @@ no infrastructure.
 ## Layout
 
 ```
-bootstrap/
-  00-bootstrap.yaml          templates bucket, artifact bucket, ECR, two GitHub OIDC roles
-  deployment-file.yaml
 cfn/
   root.yaml                  wires the nested stacks together
   deployment-file.yaml       parameters and tags Git sync deploys with
@@ -47,49 +44,23 @@ and only the root consumes them.
 
 ## One-time bootstrap
 
-The bootstrap stack owns everything that must survive a teardown of the
-application stack. Create it by hand, once, before anything else exists.
+The foundation stack lives in a separate repository,
+[`todo-app-bootstrap`](https://github.com/1MuhireDavid/todo-app-bootstrap), and
+must exist before anything here works. It owns the templates bucket this repo
+uploads to, the ECR repository, the pipeline artifact bucket and the two GitHub
+OIDC roles — everything that must survive a teardown of this stack.
 
-```bash
-aws cloudformation create-stack \
-  --stack-name todo-app-bootstrap \
-  --template-body file://bootstrap/00-bootstrap.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region us-east-1 \
-  --parameters \
-      ParameterKey=ProjectName,ParameterValue=todo-app \
-      ParameterKey=GitHubOwner,ParameterValue=1MuhireDavid \
-      ParameterKey=InfraRepoName,ParameterValue=todo-app-infra \
-      ParameterKey=AppRepoName,ParameterValue=todo-app \
-      ParameterKey=CreateOIDCProvider,ParameterValue=false
+Deploy it first, following that repository's README. Nothing in this repository
+can create it: the packaging workflow's role holds no CloudFormation permission
+at all, by design.
 
-aws cloudformation wait stack-create-complete \
-  --stack-name todo-app-bootstrap --region us-east-1
+Values arrive here as `Fn::ImportValue` on `${BootstrapStackName}-*`, which
+defaults to `todo-app-bootstrap`. Nothing is copy-pasted between the two repos.
 
-aws cloudformation describe-stacks \
-  --stack-name todo-app-bootstrap --region us-east-1 \
-  --query "Stacks[0].Outputs" --output table
-```
-
-`CreateOIDCProvider=false` because account 047719661196 already federates GitHub
-Actions. An account holds exactly one provider per URL; a second one fails with
-`EntityAlreadyExists`. In a fresh account, pass `true`.
-
-This creates, and it is worth knowing which survive a teardown:
-
-| Resource | Deletion policy | Why |
-|---|---|---|
-| `todo-app-cfn-templates-047719661196-us-east-1` | **Retain** | deleting it would destroy the templates needed to redeploy |
-| `todo-app` (ECR) | **Retain** | with no NAT, losing the image means the stack can never start again |
-| `todo-app-pipeline-artifacts-047719661196-us-east-1` | Delete | everything in it is regenerable by re-running the pipeline |
-| `todo-app-gha-infra-packaging`, `todo-app-gha-app-build` | Delete | recreated with the stack |
-
-### Why the artifact bucket is here and not in `07`
-
-The ALB in `06` writes access logs to it, and `07` has to be created *after* `06`
-because CodeDeploy needs the service, the target groups and the listeners. Owning
-the bucket in bootstrap breaks that cycle, and it also lets the app repo's OIDC
-role be scoped to a real bucket ARN instead of one guessed with `Fn::Sub`.
+Two consequences of importing from another stack, worth knowing before you hit
+them: while this stack is up, the bootstrap stack cannot be deleted and none of
+its exported values can be changed. Both failures are reported against the
+bootstrap stack, with the cause here.
 
 ---
 
@@ -115,10 +86,9 @@ workflow, and neither OIDC role holds a single CloudFormation write permission.
 3. CloudFormation will now deploy on every commit that touches the deployment
    file or the templates it points at.
 
-Optionally repeat with `bootstrap/deployment-file.yaml` and stack name
-`todo-app-bootstrap` to manage the bootstrap stack the same way. Keep it a
-separate sync configuration; the two stacks have deliberately different
-lifecycles.
+The `todo-app-bootstrap` repository can be wired up the same way, with its own
+connection and sync configuration. Keep them separate: the two stacks have
+deliberately different lifecycles.
 
 ---
 
@@ -289,14 +259,15 @@ aws cloudformation wait stack-delete-complete --stack-name todo-app --region us-
 # 3. Optional: remove the Git sync configuration, then the CodeConnections
 #    connection, in the console.
 
-# 4. Only if you are finished with the project entirely. The templates bucket
-#    and ECR repository are Retain, so they survive step 5 and must be removed
-#    by hand.
+# 4. Steps 4 and 5 belong to the todo-app-bootstrap repository and are only for
+#    when you are finished with the project entirely. The templates bucket and
+#    ECR repository are Retain, so they survive step 5 and must go by hand.
 aws s3 rm s3://todo-app-cfn-templates-047719661196-us-east-1 --recursive
 aws s3 rb s3://todo-app-cfn-templates-047719661196-us-east-1 --force
 aws ecr delete-repository --repository-name todo-app --force --region us-east-1
 
-# 5. Delete the bootstrap stack.
+# 5. Delete the bootstrap stack. This fails while step 2 is incomplete: its
+#    exports cannot be released until nothing imports them.
 aws cloudformation delete-stack --stack-name todo-app-bootstrap --region us-east-1
 ```
 
@@ -313,6 +284,9 @@ aws secretsmanager delete-secret --secret-id todo-app/redis/auth-token \
 ---
 
 ## Requirement → implementation
+
+Rows marked "(bootstrap repo)" are satisfied in
+[`todo-app-bootstrap`](https://github.com/1MuhireDavid/todo-app-bootstrap).
 
 | Requirement | File | Resource / setting |
 |---|---|---|
@@ -340,8 +314,8 @@ aws secretsmanager delete-secret --secret-id todo-app/redis/auth-token \
 | Execution role separate from task role | `06-alb-ecs.yaml` | `ExecutionRole`, `TaskRole` (no policies) |
 | `Resource: "*"` justified in a comment | `00-bootstrap`, `06`, `07` | `ecr:GetAuthorizationToken`, `ecs:RegisterTaskDefinition`, `kms:Decrypt` |
 | `iam:PassRole` narrowed | `07-cicd-pipeline.yaml` | `StringEqualsIfExists` on `iam:PassedToService` |
-| OIDC only, no static keys | `00-bootstrap.yaml` | two federated roles, `MaxSessionDuration: 3600` |
-| Trust pinned to aud + repository + ref + job_workflow_ref | `00-bootstrap.yaml` | both `AssumeRolePolicyDocument` blocks |
+| OIDC only, no static keys | `00-bootstrap.yaml` (bootstrap repo) | two federated roles, `MaxSessionDuration: 3600` |
+| Trust pinned to aud + repository + ref + job_workflow_ref | `00-bootstrap.yaml` (bootstrap repo) | both `AssumeRolePolicyDocument` blocks |
 | Tasks have no public IP | `06-alb-ecs.yaml` | `AssignPublicIp: DISABLED` |
 | Blue/green target groups | `06-alb-ecs.yaml` | `TargetGroupBlue`, `TargetGroupGreen` |
 | Prod listener 80, parameterized test listener | `06-alb-ecs.yaml` | `ProdListener`, `TestListener` |
@@ -355,10 +329,10 @@ aws secretsmanager delete-secret --secret-id todo-app/redis/auth-token \
 | Health check on `/health` with tuned thresholds | `06-alb-ecs.yaml` | both target groups |
 | Single pipeline trigger | `07-cicd-pipeline.yaml` | `PollForSourceChanges: "false"` + `EcrPushRule` |
 | Trigger role can only start this pipeline | `07-cicd-pipeline.yaml` | `PipelineTriggerRole` |
-| ECR scan on push, encryption, lifecycle | `00-bootstrap.yaml` | `EcrRepository` |
-| Buckets: versioning, SSE, PAB, lifecycle, TLS-only | `00-bootstrap.yaml` | both buckets + both policies |
-| Retain on templates bucket and ECR | `00-bootstrap.yaml` | `DeletionPolicy` / `UpdateReplacePolicy` |
-| Explicit `Delete` on the artifact bucket | `00-bootstrap.yaml` | `ArtifactBucket` |
+| ECR scan on push, encryption, lifecycle | `00-bootstrap.yaml` (bootstrap repo) | `EcrRepository` |
+| Buckets: versioning, SSE, PAB, lifecycle, TLS-only | `00-bootstrap.yaml` (bootstrap repo) | both buckets + both policies |
+| Retain on templates bucket and ECR | `00-bootstrap.yaml` (bootstrap repo) | `DeletionPolicy` / `UpdateReplacePolicy` |
+| Explicit `Delete` on the artifact bucket | `00-bootstrap.yaml` (bootstrap repo) | `ArtifactBucket` |
 | Deploy via Git sync with a checked-in deployment file | `cfn/deployment-file.yaml` | all parameters and tags |
 | Per-file content-addressed templates | `package-templates.yml` | `git hash-object \| cut -c1-12` |
 | Skip unchanged uploads | `package-templates.yml` | `aws s3api head-object` |
@@ -392,12 +366,13 @@ Named here rather than silently skipped.
 Read this before grading.
 
 1. **`aws cloudformation validate-template` has not been run against a live
-   account.** `cfn-lint` passes with no errors or warnings on all nine templates.
+   account.** `cfn-lint` passes with no errors or warnings on all eight templates
+   here, and on the bootstrap template in its own repository.
    The API call needs credentials this machine does not currently have — the
    token in the environment is expired. Run it after authenticating:
 
    ```bash
-   for f in bootstrap/00-bootstrap.yaml cfn/root.yaml cfn/nested-templates/*.yaml; do
+   for f in cfn/root.yaml cfn/nested-templates/*.yaml; do
      aws cloudformation validate-template --template-body "file://$f" \
        --region us-east-1 >/dev/null && echo "VALID   $f" || echo "FAILED  $f"
    done

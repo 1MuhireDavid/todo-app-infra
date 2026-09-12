@@ -79,5 +79,12 @@ regenerate all seven with `git hash-object <file> | cut -c1-12`.
 
 ## Before proposing a change as done
 
-`cfn-lint bootstrap/00-bootstrap.yaml cfn/root.yaml cfn/nested-templates/*.yaml`
-must pass with no errors and no warnings.
+`cfn-lint cfn/root.yaml cfn/nested-templates/*.yaml` must pass with no errors
+and no warnings.
+
+## Scope
+
+This repository holds the application stack only. The templates bucket, ECR
+repository, artifact bucket and the two OIDC roles live in `todo-app-bootstrap`
+and arrive here as `Fn::ImportValue`. Do not recreate them; do not add resources
+here that need to survive this stack's teardown.
