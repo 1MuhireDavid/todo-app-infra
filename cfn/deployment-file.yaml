@@ -46,6 +46,9 @@ parameters:
   # Wide open so the green task set can be checked from anywhere during the
   # demo. Narrow to a single address for anything that is not a lab.
   TestListenerCidr: 0.0.0.0/0
+  # S3 prefix list for us-east-1. Region-specific - re-look it up if the stack
+  # ever moves region.
+  S3PrefixListId: pl-63a5400a
 
   # Database - no credential here, and there never will be. RDS generates the
   # master password into Secrets Manager and the templates only pass its ARN.

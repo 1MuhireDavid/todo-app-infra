@@ -136,6 +136,14 @@ Parameters:
     Default: "0.0.0.0/0"
     Description: Who may reach the test listener. Narrow this for anything real.
 
+  S3PrefixListId:
+    Type: String
+    AllowedPattern: "^pl-[0-9a-f]+$"
+    Description: >-
+      Managed prefix list for S3 in this region, used by the task egress rule to
+      the S3 gateway endpoint. Region-specific; find it with
+      ec2 describe-managed-prefix-lists.
+
   # --- Database
 
   DatabaseName:
@@ -316,6 +324,7 @@ Resources:
         ContainerPort: !Ref ContainerPort
         TestListenerPort: !Ref TestListenerPort
         TestListenerCidr: !Ref TestListenerCidr
+        S3PrefixListId: !Ref S3PrefixListId
       Tags:
         - Key: Project
           Value: !Ref ProjectName

@@ -58,6 +58,13 @@ Parameters:
     Default: 6379
     Description: Redis port.
 
+  S3PrefixListId:
+    Type: String
+    AllowedPattern: "^pl-[0-9a-f]+$"
+    Description: >-
+      Managed prefix list for S3 in this region. The gateway endpoint has no
+      security group, so task egress to S3 is allowed by prefix list.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -166,6 +173,14 @@ Resources:
           Description: >-
             Tasks to the interface endpoints - ECR pulls, log delivery, STS and
             Secrets Manager lookups performed by the execution role.
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationPrefixListId: !Ref S3PrefixListId
+          Description: >-
+            Tasks to S3 through the gateway endpoint. ECR serves image layers
+            from S3, so without this an image pull authenticates and then hangs
+            on the layer download.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-ecs"

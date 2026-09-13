@@ -277,7 +277,7 @@ Resources:
                 Action:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
-                Resource: !Sub "${LogGroup.Arn}:*"
+                Resource: !GetAtt LogGroup.Arn
               - Sid: ReadContainerSecrets
                 Effect: Allow
                 Action:
