@@ -64,6 +64,23 @@
       "Resource": "arn:aws:secretsmanager:us-east-1:047719661196:secret:todo-app/*"
     },
     {
+      "Sid": "RdsManagedMasterSecret",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:TagResource",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:RotateSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-1:047719661196:secret:rds!db-*"
+    },
+    {
+      "Sid": "DescribeDefaultEncryptionKeys",
+      "Effect": "Allow",
+      "Action": "kms:DescribeKey",
+      "Resource": "*"
+    },
+    {
       "Sid": "GenerateSecretStringHasNoResource",
       "Effect": "Allow",
       "Action": "secretsmanager:GetRandomPassword",

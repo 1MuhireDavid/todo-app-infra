@@ -69,13 +69,31 @@ Every nested logical ID in `root.yaml` ends in `Stack`, so `todo-app-*Stack-*`
 matches all seven and deliberately does **not** match `todo-app-bootstrap` — the
 bootstrap stack has its own execution role, in its own repository.
 
+Trusting itself is not enough, though: the execution role also has to be allowed
+to *hand itself over*. CloudFormation propagates the root stack's service role to
+every nested stack it creates, and that propagation is an `iam:PassRole` call
+made as the execution role. Without it the root stack reaches the first
+`AWS::CloudFormation::Stack` resource and stops:
+
+```
+User: arn:aws:sts::047719661196:assumed-role/todo-app-cfn-exec-app/AWSCloudFormation
+is not authorized to perform: iam:PassRole on resource:
+arn:aws:iam::047719661196:role/todo-app-cfn-exec-app
+```
+
+That is what `PassSelfToNestedStacks` in
+`permissions-policy-1-network-compute.json` is for. It is separate from
+`PassRolesToTheServicesThatUseThem` in policy 2 because the passed-to service is
+CloudFormation itself, not one of the five runtime services, and because the
+resource is one named role rather than the `todo-app-*` wildcard.
+
 ### Where `Resource: "*"` appears, and why
 
 Resource-scoped: nested stacks, the templates bucket prefix, the Redis secret,
 every `todo-app-*` role, the log group, the CodeDeploy application and group, the
 pipeline, the EventBridge rule.
 
-`Resource: "*"` in five statements, in each case because the API genuinely takes
+`Resource: "*"` in eight statements, in each case because the API genuinely takes
 no resource ARN:
 
 | Statement | Why |
@@ -86,6 +104,39 @@ no resource ARN:
 | `Autoscaling` | Application Auto Scaling supports no resource-level permissions at all |
 | `GenerateSecretStringHasNoResource` | `secretsmanager:GetRandomPassword` is an account-level call |
 | `ServiceLinkedRolesOnFirstUse` | constrained by an `iam:AWSServiceName` condition instead, listing the five services |
+| `DescribeDefaultEncryptionKeys` | the two AWS managed keys in play, `aws/rds` and `aws/secretsmanager`, have account-specific key IDs that cannot be written down at template time; `kms:DescribeKey` is metadata-only |
+| `DescribeLogGroupsHasNoResource` | `logs:DescribeLogGroups` enumerates the account's log groups; scoped to one group ARN it is denied outright — see below |
+
+### Why `logs:DescribeLogGroups` is its own statement
+
+`!GetAtt LogGroup.Arn` is not a string CloudFormation assembles locally. To
+resolve the attribute it calls `logs:DescribeLogGroups`, and that is an
+enumeration over the account, not a read of one named group — a grant scoped to
+`log-group:/ecs/todo-app*` is denied. The failure surfaces somewhere unhelpful:
+
+```
+ExecutionRole  CREATE_FAILED
+Unable to retrieve Arn attribute for AWS::Logs::LogGroup, with error message
+Access denied for operation 'logs:DescribeLogGroups'.
+```
+
+The resource that "failed to create" is the role, which has nothing to do with
+log groups; it failed because a `Resource` inside its inline policy could not be
+resolved. Every other `logs:` action stays scoped to `/ecs/todo-app*` in
+`TaskLogGroup`.
+
+### `ManageMasterUserPassword` needs caller permissions
+
+`DbInstance` in `04-database.yaml` sets `ManageMasterUserPassword: true`, so RDS
+creates the master secret in Secrets Manager **as the calling principal** — the
+execution role, not an RDS service principal. That needs
+`secretsmanager:CreateSecret` and `secretsmanager:TagResource` on the secret RDS
+is about to create, plus `kms:DescribeKey` for the default
+`aws/secretsmanager` key.
+
+RDS names that secret `rds!db-<uuid>`, which is why `RdsManagedMasterSecret` is a
+separate statement from `RedisAuthTokenSecret`: the Redis secret is ours and sits
+under the `todo-app/` prefix, this one is named by RDS and never matches it.
 
 RDS and ElastiCache are also `"*"`: their `Create*` calls do accept ARNs, but the
 ARN of a database that does not exist yet cannot be predicted before
