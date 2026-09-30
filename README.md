@@ -117,7 +117,7 @@ yet and publishes the image without attempting a deployment. See step 3.
    `build-and-push` workflow — from the Actions tab, or just push to `main`.
    Nothing manual, and nothing is expected to fail.
 
-   It builds the image and pushes `sha-<short>` and `latest`. Pushing `latest`
+   It builds the image and pushes it as `latest`. Pushing it
    triggers nothing yet, because the EventBridge rule it would fire is created by
    the stack in the next step. The stack needs the image to exist first: the
    tasks have no internet route to fall back to.

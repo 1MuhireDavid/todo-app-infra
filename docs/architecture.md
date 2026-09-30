@@ -86,8 +86,7 @@ flowchart LR
 
     subgraph appgh["GitHub: todo-app"]
         acommit([push to main]) --> abuild[docker build]
-        abuild --> asha["push sha-short<br/>no trigger"]
-        asha --> alatest(["push latest<br/>THE trigger"])
+        abuild --> alatest(["push latest<br/>THE trigger"])
     end
 
     role1{{"OIDC role: infra packaging<br/>aud + sub"}}
@@ -101,7 +100,6 @@ flowchart LR
     s3a[(artifact bucket)]
 
     iupload --> s3t
-    asha --> ecrrepo
     alatest --> ecrrepo
 
     ipush --> sync["CloudFormation Git sync"]

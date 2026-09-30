@@ -34,10 +34,7 @@ Parameters:
   ImageTag:
     Type: String
     Default: latest
-    Description: >-
-      The tag that triggers a deployment. The build pushes both sha-<short> and
-      this tag; only a push of this one starts the pipeline, so the immutable
-      sha tag stays available for rollback without redeploying anything.
+    Description: The tag the build pushes and the pipeline deploys.
 
   ClusterName:
     Type: String
@@ -592,8 +589,6 @@ Resources:
             - SUCCESS
           repository-name:
             - !Ref EcrRepositoryName
-          # Filtered to the deployed tag. Without this the sha-<short> push
-          # from the same build fires a second, identical execution.
           image-tag:
             - !Ref ImageTag
       Targets:
