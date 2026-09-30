@@ -9,11 +9,9 @@ Description: >-
   deployment controller, and CloudFormation cannot update TaskDefinition,
   LoadBalancers or NetworkConfiguration on such a service. The task definition
   below is therefore the bootstrap revision only - the one the service is born
-  with. From the first pipeline run onwards the live revision comes from
-  ecs/taskdef.json in the application repository, which is where a change to
-  the container shape belongs. Keep the two in step: this file defines what the
-  roles, log group and secret wiring must look like, and taskdef.json restates
-  it for the deploy.
+  with. From the first pipeline run onwards every revision is rendered by the
+  RenderProject CodeBuild step in 07-cicd-pipeline.yaml. A change to the
+  container shape belongs in both places.
 
 Parameters:
 
