@@ -22,11 +22,11 @@ parameters:
 
   # Managed by package-templates.yml
   NetworkTemplateHash: d03fedde6dc4
-  SecurityTemplateHash: 007dadfe632b
+  SecurityTemplateHash: cd5e9e118c19
   VpcEndpointsTemplateHash: b04c3b3d25db
   DatabaseTemplateHash: 033963922f91
   CacheTemplateHash: 4b3d878cdd21
-  AlbEcsTemplateHash: 4deb1182fc5a
+  AlbEcsTemplateHash: 7760d2ada142
   CicdTemplateHash: 5423f22060db
 
   # Network
