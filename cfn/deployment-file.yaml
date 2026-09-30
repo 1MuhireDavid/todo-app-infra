@@ -45,7 +45,6 @@ parameters:
   LogRetentionDays: 14
 
   # Delivery
-  TerminationWaitTimeInMinutes: 10
   DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
 
 tags:

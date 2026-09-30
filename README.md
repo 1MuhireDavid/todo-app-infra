@@ -330,7 +330,7 @@ Rows marked "(bootstrap repo)" are satisfied in
 | Prod listener 80, parameterized test listener | `06-alb-ecs.yaml` | `ProdListener`, `TestListener` |
 | `deregistration_delay` 30s | `06-alb-ecs.yaml` | `TargetGroupAttributes` on both groups |
 | CodeDeploy owns the task definition | `06-alb-ecs.yaml` | `DeploymentController: CODE_DEPLOY` |
-| Blue survives for rollback | `07-cicd-pipeline.yaml` | `TerminationWaitTimeInMinutes: 10` |
+| Blue survives for rollback | `07-cicd-pipeline.yaml` | `TerminationWaitTimeInMinutes: 3` |
 | Autoscaling 1/1/4, asymmetric cooldowns | `06-alb-ecs.yaml` | `ScalableTarget`, `CpuScalingPolicy` |
 | Container Insights | `06-alb-ecs.yaml` | `ClusterSettings` |
 | Log group explicit, 14-day retention | `06-alb-ecs.yaml` | `LogGroup` |

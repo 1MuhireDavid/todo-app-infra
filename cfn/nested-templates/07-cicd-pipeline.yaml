@@ -121,16 +121,6 @@ Parameters:
     Type: Number
     Description: Read cache TTL passed to the application.
 
-  TerminationWaitTimeInMinutes:
-    Type: Number
-    Default: 10
-    MinValue: 0
-    MaxValue: 2880
-    Description: >-
-      How long the blue task set survives after traffic has shifted. Ten
-      minutes is enough to notice a problem in the logs and roll back by
-      shifting traffic straight back, rather than waiting out a fresh deploy.
-
   DeploymentConfigName:
     Type: String
     Default: CodeDeployDefault.ECSAllAtOnce
@@ -192,7 +182,7 @@ Resources:
           ActionOnTimeout: CONTINUE_DEPLOYMENT
         TerminateBlueInstancesOnDeploymentSuccess:
           Action: TERMINATE
-          TerminationWaitTimeInMinutes: !Ref TerminationWaitTimeInMinutes
+          TerminationWaitTimeInMinutes: 3
       ECSServices:
         - ClusterName: !Ref ClusterName
           ServiceName: !Ref ServiceName

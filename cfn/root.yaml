@@ -208,11 +208,6 @@ Parameters:
 
   # --- Delivery
 
-  TerminationWaitTimeInMinutes:
-    Type: Number
-    Default: 10
-    Description: How long the blue task set survives after cutover.
-
   DeploymentConfigName:
     Type: String
     Default: CodeDeployDefault.ECSAllAtOnce
@@ -389,7 +384,6 @@ Resources:
         RedisPort: !GetAtt CacheStack.Outputs.PrimaryEndpointPort
         RedisAuthSecretArn: !GetAtt CacheStack.Outputs.AuthTokenSecretArn
         CacheTtlSeconds: !Ref CacheTtlSeconds
-        TerminationWaitTimeInMinutes: !Ref TerminationWaitTimeInMinutes
         DeploymentConfigName: !Ref DeploymentConfigName
       Tags:
         - Key: Project

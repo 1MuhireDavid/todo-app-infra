@@ -109,7 +109,7 @@ flowchart LR
     pipe --> render["CodeBuild<br/>taskdef.json + appspec.yaml<br/>from stack parameters"]
     render --> s3a
     s3a --> cd
-    pipe --> cd["CodeDeploy blue/green<br/>ECSAllAtOnce, 10 min blue wait"]
+    pipe --> cd["CodeDeploy blue/green<br/>ECSAllAtOnce, 3 min blue wait"]
     cd --> svc["ECS service<br/>DeploymentController CODE_DEPLOY"]
 ```
 
@@ -130,6 +130,6 @@ sequenceDiagram
     ECS-->>ALB: register green targets behind the test listener :9000 (not public)
     ALB-->>CD: green healthy (2 checks, 15s apart)
     CD->>ALB: shift prod listener :80 to green
-    Note over CD,ECS: blue kept for 10 minutes — rollback is a second shift, not a redeploy
+    Note over CD,ECS: blue kept for 3 minutes — rollback is a second shift, not a redeploy
     CD->>ECS: terminate blue task set
 ```
