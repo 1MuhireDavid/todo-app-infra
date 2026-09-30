@@ -245,6 +245,7 @@ Resources:
       Parameters:
         ProjectName: !Ref ProjectName
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        VpcCidr: !GetAtt NetworkStack.Outputs.VpcCidr
         ContainerPort: !Ref ContainerPort
       Tags:
         - Key: Project

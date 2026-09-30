@@ -47,8 +47,8 @@ flowchart TB
     ecs -- "tcp 5432 from sg-ecs only" --> proxy
     proxy -- "tcp 5432 from sg-rdsproxy only<br/>(sg-ecs is NOT allowed here)" --> rds
     ecs -- "tcp 6379 from sg-ecs only" --> redis
-    ecs -. "tcp 443 from sg-ecs" .-> vpce
-    proxy -. "tcp 443 from sg-rdsproxy<br/>reads the master secret" .-> vpce
+    ecs -. "tcp 443 from the VPC CIDR" .-> vpce
+    proxy -. "tcp 443 from the VPC CIDR<br/>reads the master secret" .-> vpce
     ecs -. "image layers" .-> s3gw
 
     vpce -.-> sm
@@ -66,7 +66,7 @@ flowchart TB
 | `sg-rdsproxy` | 5432 from `sg-ecs` |
 | `sg-rds` | 5432 from `sg-rdsproxy` **only** |
 | `sg-cache` | 6379 from `sg-ecs`; 6379 from `sg-cache` (replication) |
-| `sg-vpce` | 443 from `sg-ecs`; 443 from `sg-rdsproxy` |
+| `sg-vpce` | 443 from the VPC CIDR (`10.40.0.0/16`) |
 
 Only ingress is declared. Security groups are stateful, so replies need no
 egress rule, and the private subnets have no route to the internet in any case.

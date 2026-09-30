@@ -308,7 +308,7 @@ Rows marked "(bootstrap repo)" are satisfied in
 | One SG per resource type, chained by reference | `02-security.yaml` | six groups, `SourceSecurityGroupId` throughout |
 | RDS reachable only from the proxy | `02-security.yaml` | `DatabaseIngressFromRdsProxy` — no rule from `sg-ecs` |
 | Ingress-only security groups | `02-security.yaml` | no `SecurityGroupEgress` anywhere; groups are stateful |
-| Circular SG references broken cleanly | `02-security.yaml` | seven standalone `SecurityGroupIngress` rules |
+| Circular SG references broken cleanly | `02-security.yaml` | six standalone `SecurityGroupIngress` rules |
 | Test listener not public | `02-security.yaml` | `sg-alb` admits port 80 only |
 | RDS password never in the repo | `04-database.yaml` | `ManageMasterUserPassword: true` |
 | Proxy authenticates with that secret | `04-database.yaml` | `RdsProxyRole` scoped to `MasterUserSecret.SecretArn` |
@@ -393,13 +393,15 @@ Read this before grading.
 
 3. **The spec's "VPC endpoints: ingress 443 from ECS only" would have broken RDS
    Proxy**, which reads its master secret from Secrets Manager over the VPC and,
-   with no NAT, has no other route. `VpcEndpointIngressFromRdsProxy` was added.
-   Without it the proxy settles into `incompatible-network` and the symptom looks
-   like a database problem.
+   with no NAT, has no other route. The endpoint group therefore admits 443 from
+   the whole VPC CIDR (`VpcEndpointIngressFromVpc`), which covers the tasks and
+   the proxy with one rule. Without the proxy's access it settles into
+   `incompatible-network` and the symptom looks like a database problem.
 
 4. **Security groups declare ingress only.** They are stateful, so a reply to
    an allowed inbound connection needs no egress rule, and every ingress rule
-   except port 80 on the ALB names a source security group. The test listener
+   names a source security group except port 80 on the ALB and 443 on the
+   endpoints, which is open to the VPC CIDR. The test listener
    port has no ingress rule at all: an unreleased green version is never exposed
    to the internet.
 

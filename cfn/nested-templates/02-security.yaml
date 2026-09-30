@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
-  One security group per resource type. Only ingress is declared, and every
-  rule except the public HTTP listener names a source security group rather
-  than an address range. Security groups are stateful, so replies to allowed
-  inbound traffic need no egress rule.
+  One security group per resource type. Only ingress is declared. Rules name a
+  source security group, except the public HTTP listener and the VPC endpoints,
+  which accept HTTPS from the whole VPC. Security groups are stateful, so
+  replies to allowed inbound traffic need no egress rule.
 
 Parameters:
 
@@ -15,6 +15,10 @@ Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: VPC that owns every group here.
+
+  VpcCidr:
+    Type: String
+    Description: VPC CIDR block, allowed to reach the interface endpoints.
 
   ContainerPort:
     Type: Number
@@ -166,27 +170,17 @@ Resources:
       SourceSecurityGroupId: !Ref CacheSecurityGroup
       Description: Replication between the primary and the replica.
 
-  VpcEndpointIngressFromEcs:
+  # Covers every client in the VPC, including the RDS Proxy reading its secret
+  # through the Secrets Manager endpoint.
+  VpcEndpointIngressFromVpc:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref VpcEndpointSecurityGroup
       IpProtocol: tcp
       FromPort: 443
       ToPort: 443
-      SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
-      Description: HTTPS from the tasks to the interface endpoints.
-
-  # The proxy reads the RDS master secret through the Secrets Manager endpoint;
-  # without this it settles in the incompatible-network state.
-  VpcEndpointIngressFromRdsProxy:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref VpcEndpointSecurityGroup
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      SourceSecurityGroupId: !Ref RdsProxySecurityGroup
-      Description: HTTPS from the RDS Proxy to the Secrets Manager endpoint.
+      CidrIp: !Ref VpcCidr
+      Description: HTTPS from anything in the VPC to the interface endpoints.
 
 Outputs:
 
