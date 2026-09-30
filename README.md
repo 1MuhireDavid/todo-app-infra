@@ -191,8 +191,10 @@ aws ecs describe-tasks --cluster todo-app-cluster --region us-east-1 \
   --query "tasks[0].attachments[0].details[?name=='networkInterfaceId']"
 ```
 
-During a deployment, the green task set is reachable on the test listener at
-port 9000 before any production traffic shifts.
+During a deployment, CodeDeploy points the test listener (port 9000) at the
+green task set. The ALB security group has no rule for that port, so it is not
+reachable from the internet; green is validated by the target group health check
+before production traffic shifts.
 
 ---
 
@@ -297,8 +299,9 @@ Rows marked "(bootstrap repo)" are satisfied in
 | ECR, logs, STS, Secrets Manager reachable privately | `03-vpc-endpoints.yaml` | five `Interface` endpoints |
 | One SG per resource type, chained by reference | `02-security.yaml` | six groups, `SourceSecurityGroupId` throughout |
 | RDS reachable only from the proxy | `02-security.yaml` | `DatabaseIngressFromRdsProxy` — no rule from `sg-ecs` |
-| Explicit egress on every SG | `02-security.yaml` | inline `SecurityGroupEgress` on all six |
-| Circular SG references broken cleanly | `02-security.yaml` | eight standalone `SecurityGroupIngress` / `Egress` |
+| Ingress-only security groups | `02-security.yaml` | no `SecurityGroupEgress` anywhere; groups are stateful |
+| Circular SG references broken cleanly | `02-security.yaml` | seven standalone `SecurityGroupIngress` rules |
+| Test listener not public | `02-security.yaml` | `sg-alb` admits port 80 only |
 | RDS password never in the repo | `04-database.yaml` | `ManageMasterUserPassword: true` |
 | Proxy authenticates with that secret | `04-database.yaml` | `RdsProxyRole` scoped to `MasterUserSecret.SecretArn` |
 | `RequireTLS` on the proxy | `04-database.yaml` | `RdsProxy.RequireTLS: true` |
@@ -347,7 +350,7 @@ Named here rather than silently skipped.
 
 | Skipped | What production does |
 |---|---|
-| **TLS on the ALB** | ACM certificate on an HTTPS:443 listener, HTTP:80 redirecting to it, a modern `SslPolicy`. Skipped because the lab has no domain. Today the app is served over plain HTTP and the test listener is open to `0.0.0.0/0`. |
+| **TLS on the ALB** | ACM certificate on an HTTPS:443 listener, HTTP:80 redirecting to it, a modern `SslPolicy`. Skipped because the lab has no domain. Today the app is served over plain HTTP on port 80; the test listener is not reachable from outside. |
 | **WAF, Shield Advanced, GuardDuty, CloudTrail data events** | WAF web ACL on the ALB with managed rule groups and rate limiting; GuardDuty on for the account; CloudTrail data events on both buckets. |
 | **Multi-region, cross-region replication, PITR beyond 1 day** | Cross-region automated backup replication, 7–35 day retention, a tested restore runbook. `BackupRetentionPeriod` is 1 here. |
 | **RDS Multi-AZ** | On. It is a parameter defaulting to `"false"` purely for cost — flip `MultiAZ` in the deployment file. |
@@ -388,10 +391,11 @@ Read this before grading.
    Without it the proxy settles into `incompatible-network` and the symptom looks
    like a database problem.
 
-4. **The ALB egress rule points at the task security group, not the VPC CIDR.**
-   The spec said "within the VPC CIDR"; a group reference is strictly tighter and
-   keeps the "never by CIDR" rule intact everywhere except the two public-facing
-   ALB ingress rules.
+4. **Security groups declare ingress only.** They are stateful, so a reply to
+   an allowed inbound connection needs no egress rule, and every ingress rule
+   except port 80 on the ALB names a source security group. The test listener
+   port has no ingress rule at all: an unreleased green version is never exposed
+   to the internet.
 
 5. **The task definition is written twice, and that is not duplication for its
    own sake.** CloudFormation cannot update `TaskDefinition` on a service with the

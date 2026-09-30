@@ -59,18 +59,18 @@ flowchart TB
 
 ### Security group rules in table form
 
-| Group | Ingress | Egress |
-|---|---|---|
-| `sg-alb` | 80 from `0.0.0.0/0`; 9000 from `TestListenerCidr` | 8080 to `sg-ecs` |
-| `sg-ecs` | 8080 from `sg-alb` | 5432 to `sg-rdsproxy`; 6379 to `sg-cache`; 443 to `sg-vpce` |
-| `sg-rdsproxy` | 5432 from `sg-ecs` | 5432 to `sg-rds`; 443 to `sg-vpce` |
-| `sg-rds` | 5432 from `sg-rdsproxy` **only** | none (`127.0.0.1/32` placeholder) |
-| `sg-cache` | 6379 from `sg-ecs`; 6379 from `sg-cache` (replication) | 6379 to `sg-cache` |
-| `sg-vpce` | 443 from `sg-ecs`; 443 from `sg-rdsproxy` | none (`127.0.0.1/32` placeholder) |
+| Group | Ingress |
+|---|---|
+| `sg-alb` | 80 from `0.0.0.0/0` |
+| `sg-ecs` | 8080 from `sg-alb` |
+| `sg-rdsproxy` | 5432 from `sg-ecs` |
+| `sg-rds` | 5432 from `sg-rdsproxy` **only** |
+| `sg-cache` | 6379 from `sg-ecs`; 6379 from `sg-cache` (replication) |
+| `sg-vpce` | 443 from `sg-ecs`; 443 from `sg-rdsproxy` |
 
-Every group declares explicit egress. A CloudFormation security group with no
-`SecurityGroupEgress` silently gets allow-all to `0.0.0.0/0`, so the two groups
-that never initiate a connection carry a `127.0.0.1/32` rule to suppress it.
+Only ingress is declared. Security groups are stateful, so replies need no
+egress rule, and the private subnets have no route to the internet in any case.
+The test listener port (9000) is deliberately absent from `sg-alb`.
 
 ## 2. CI/CD — two repos, two OIDC roles, one trigger
 
@@ -131,7 +131,7 @@ sequenceDiagram
     CP->>CP: ECR source (imageDetail.json), CodeBuild renders appspec + taskdef
     CP->>CD: CreateDeployment, IMAGE1_NAME substituted
     CD->>ECS: start green task set on the new revision
-    ECS-->>ALB: register green targets on the test listener :9000
+    ECS-->>ALB: register green targets behind the test listener :9000 (not public)
     ALB-->>CD: green healthy (2 checks, 15s apart)
     CD->>ALB: shift prod listener :80 to green
     Note over CD,ECS: blue kept for 10 minutes — rollback is a second shift, not a redeploy

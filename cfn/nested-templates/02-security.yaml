@@ -1,17 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
-  One security group per resource type, chained by group reference rather than
-  by CIDR. Every group declares explicit egress, because a security group with
-  no SecurityGroupEgress property gets an implicit allow-all-to-0.0.0.0/0 rule
-  from CloudFormation.
-  Structure: egress is declared inline and ingress is declared as standalone
-  AWS::EC2::SecurityGroupIngress resources. That is what keeps the mutual
-  references (ALB to tasks, tasks to proxy, proxy to endpoints) from forming a
-  circular dependency, without widening a single rule to a CIDR.
-  There is deliberately no VpcCidr parameter: apart from the two public-facing
-  ALB ingress rules, not one rule in this stack is expressed as an address
-  range.
+  One security group per resource type. Only ingress is declared, and every
+  rule except the public HTTP listener names a source security group rather
+  than an address range. Security groups are stateful, so replies to allowed
+  inbound traffic need no egress rule.
 
 Parameters:
 
@@ -30,24 +23,6 @@ Parameters:
     MaxValue: 65535
     Description: Port the Spring Boot container listens on.
 
-  TestListenerPort:
-    Type: Number
-    Default: 9000
-    MinValue: 1
-    MaxValue: 65535
-    Description: >-
-      ALB test listener port used by CodeDeploy to expose the green task set
-      before traffic is shifted.
-
-  TestListenerCidr:
-    Type: String
-    Default: "0.0.0.0/0"
-    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
-    Description: >-
-      Who may reach the test listener. Defaults wide so the green task set can
-      be checked from anywhere during the lab demo; narrow this to an office or
-      home /32 for anything real.
-
   DatabasePort:
     Type: Number
     Default: 5432
@@ -58,19 +33,7 @@ Parameters:
     Default: 6379
     Description: Redis port.
 
-  S3PrefixListId:
-    Type: String
-    AllowedPattern: "^pl-[0-9a-f]+$"
-    Description: >-
-      Managed prefix list for S3 in this region. The gateway endpoint has no
-      security group, so task egress to S3 is allowed by prefix list.
-
 Resources:
-
-  # ---------------------------------------------------------------------------
-  # Created first, in dependency order, so that every group can declare its
-  # egress inline: a group only ever points at groups defined above it.
-  # ---------------------------------------------------------------------------
 
   VpcEndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -78,13 +41,6 @@ Resources:
       GroupName: !Sub "${ProjectName}-sg-vpce"
       GroupDescription: Interface VPC endpoints - ECR, logs, STS, Secrets Manager.
       VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        # Endpoint ENIs never initiate a connection. CloudFormation insists on
-        # at least one egress rule to suppress the implicit allow-all, so this
-        # is the conventional no-op destination.
-        - IpProtocol: "-1"
-          CidrIp: "127.0.0.1/32"
-          Description: No egress - endpoint ENIs only answer inbound requests.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-vpce"
@@ -97,10 +53,6 @@ Resources:
       GroupName: !Sub "${ProjectName}-sg-rds"
       GroupDescription: RDS PostgreSQL instance - reachable from the RDS Proxy only.
       VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: "127.0.0.1/32"
-          Description: No egress - the database only answers inbound connections.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-rds"
@@ -113,10 +65,6 @@ Resources:
       GroupName: !Sub "${ProjectName}-sg-cache"
       GroupDescription: ElastiCache Redis nodes - reachable from the ECS tasks only.
       VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: "127.0.0.1/32"
-          Description: No general egress - replica sync is allowed by the self rule below.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-cache"
@@ -127,22 +75,8 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub "${ProjectName}-sg-rdsproxy"
-      GroupDescription: RDS Proxy ENIs - accept from ECS, connect to RDS and Secrets Manager.
+      GroupDescription: RDS Proxy ENIs - reachable from the ECS tasks only.
       VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: !Ref DatabasePort
-          ToPort: !Ref DatabasePort
-          DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
-          Description: Proxy to the PostgreSQL instance.
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          DestinationSecurityGroupId: !Ref VpcEndpointSecurityGroup
-          Description: >-
-            Proxy to the Secrets Manager interface endpoint. Required - the
-            proxy retrieves the RDS-managed master secret over the VPC, and with
-            no NAT gateway the endpoint is its only route to that API.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-rdsproxy"
@@ -153,80 +87,33 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub "${ProjectName}-sg-ecs"
-      GroupDescription: Fargate tasks - accept from the ALB, connect to proxy, cache and endpoints.
+      GroupDescription: Fargate tasks - reachable from the ALB only.
       VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: !Ref DatabasePort
-          ToPort: !Ref DatabasePort
-          DestinationSecurityGroupId: !Ref RdsProxySecurityGroup
-          Description: Tasks to the RDS Proxy. There is deliberately no rule to the instance.
-        - IpProtocol: tcp
-          FromPort: !Ref RedisPort
-          ToPort: !Ref RedisPort
-          DestinationSecurityGroupId: !Ref CacheSecurityGroup
-          Description: Tasks to ElastiCache Redis.
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          DestinationSecurityGroupId: !Ref VpcEndpointSecurityGroup
-          Description: >-
-            Tasks to the interface endpoints - ECR pulls, log delivery, STS and
-            Secrets Manager lookups performed by the execution role.
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          DestinationPrefixListId: !Ref S3PrefixListId
-          Description: >-
-            Tasks to S3 through the gateway endpoint. ECR serves image layers
-            from S3, so without this an image pull authenticates and then hangs
-            on the layer download.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-ecs"
         - Key: Project
           Value: !Ref ProjectName
 
+  # The test listener has no ingress rule on purpose: the green task set is
+  # checked by the ALB health check, never exposed to the internet.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub "${ProjectName}-sg-alb"
-      GroupDescription: Public ALB - HTTP from the internet, test listener from a named CIDR.
+      GroupDescription: Public ALB - HTTP from the internet on the production listener only.
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: "0.0.0.0/0"
-          Description: >-
-            Production listener. Plain HTTP because the lab has no domain and
-            therefore no ACM certificate - see the out-of-scope section of the
-            README; production terminates TLS on 443 and redirects 80.
-        - IpProtocol: tcp
-          FromPort: !Ref TestListenerPort
-          ToPort: !Ref TestListenerPort
-          CidrIp: !Ref TestListenerCidr
-          Description: CodeDeploy test listener, for validating the green task set.
-      SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
-          DestinationSecurityGroupId: !Ref EcsTaskSecurityGroup
-          Description: >-
-            Forwarded traffic and health checks to the tasks. Scoped to the task
-            security group rather than to the VPC CIDR, which is tighter than a
-            CIDR rule and keeps the chaining consistent.
+          Description: Production listener.
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-sg-alb"
         - Key: Project
           Value: !Ref ProjectName
-
-  # ---------------------------------------------------------------------------
-  # Ingress rules, all standalone. Each one points back at a group created after
-  # the group it attaches to, which is exactly the cycle that inline rules
-  # cannot express.
-  # ---------------------------------------------------------------------------
 
   EcsIngressFromAlb:
     Type: AWS::EC2::SecurityGroupIngress
@@ -236,7 +123,7 @@ Resources:
       FromPort: !Ref ContainerPort
       ToPort: !Ref ContainerPort
       SourceSecurityGroupId: !Ref AlbSecurityGroup
-      Description: Container port from the ALB only. Nothing else can reach the tasks.
+      Description: Container port from the ALB only.
 
   RdsProxyIngressFromEcs:
     Type: AWS::EC2::SecurityGroupIngress
@@ -248,6 +135,7 @@ Resources:
       SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
       Description: PostgreSQL from the ECS tasks.
 
+  # Not from the task group, so the application cannot bypass the proxy.
   DatabaseIngressFromRdsProxy:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -256,10 +144,7 @@ Resources:
       FromPort: !Ref DatabasePort
       ToPort: !Ref DatabasePort
       SourceSecurityGroupId: !Ref RdsProxySecurityGroup
-      Description: >-
-        PostgreSQL from the RDS Proxy only - deliberately not from the ECS task
-        group, so the application cannot bypass the proxy and open a direct
-        connection to the instance.
+      Description: PostgreSQL from the RDS Proxy only.
 
   CacheIngressFromEcs:
     Type: AWS::EC2::SecurityGroupIngress
@@ -279,19 +164,7 @@ Resources:
       FromPort: !Ref RedisPort
       ToPort: !Ref RedisPort
       SourceSecurityGroupId: !Ref CacheSecurityGroup
-      Description: >-
-        Replica to primary replication inside the replication group. A group
-        cannot reference itself inline, so this has to be a standalone rule.
-
-  CacheEgressToSelf:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref CacheSecurityGroup
-      IpProtocol: tcp
-      FromPort: !Ref RedisPort
-      ToPort: !Ref RedisPort
-      DestinationSecurityGroupId: !Ref CacheSecurityGroup
-      Description: Outbound half of the replication rule above.
+      Description: Replication between the primary and the replica.
 
   VpcEndpointIngressFromEcs:
     Type: AWS::EC2::SecurityGroupIngress
@@ -303,6 +176,8 @@ Resources:
       SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
       Description: HTTPS from the tasks to the interface endpoints.
 
+  # The proxy reads the RDS master secret through the Secrets Manager endpoint;
+  # without this it settles in the incompatible-network state.
   VpcEndpointIngressFromRdsProxy:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -311,10 +186,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Ref RdsProxySecurityGroup
-      Description: >-
-        HTTPS from the RDS Proxy to the Secrets Manager endpoint. Without this
-        the proxy cannot read the master secret and settles in the
-        incompatible-network state.
+      Description: HTTPS from the RDS Proxy to the Secrets Manager endpoint.
 
 Outputs:
 
