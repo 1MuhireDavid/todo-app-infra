@@ -78,10 +78,8 @@ The test listener port (9000) is deliberately absent from `sg-alb`.
 flowchart LR
     subgraph infra["GitHub: todo-app-infra"]
         icommit([push to main]) --> ilint[cfn-lint]
-        ilint --> ihash["hash each nested template<br/>git hash-object | cut -c1-12"]
-        ihash --> iupload["upload changed only<br/>(head-object check)"]
-        iupload --> iwrite["write hashes into<br/>cfn/deployment-file.yaml"]
-        iwrite --> ipush([commit with skip ci])
+        ilint --> iupload["aws cloudformation package<br/>uploads nested templates"]
+        iupload --> ipush([commit cfn/packaged/root.yaml])
     end
 
     subgraph appgh["GitHub: todo-app"]

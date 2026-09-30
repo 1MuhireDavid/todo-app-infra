@@ -1,25 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
-# =============================================================================
-# Why every nested template has its own hash parameter
-#
-# The packaging workflow uploads each nested template as
-# templates/<name>-<hash>.yaml, where <hash> is the first 12 characters of
-# `git hash-object` over that one file, and commits the hashes back into
-# cfn/deployment-file.yaml. Git sync then deploys that commit.
-#
-# CloudFormation decides whether a nested stack needs updating by comparing the
-# TemplateURL string. It does not fetch the object and diff it. So a single
-# shared version string - a build number, a commit sha, a date - changes every
-# URL on every push and drags all seven nested stacks through an update, even
-# the six that did not change. On this stack that means the RDS and ElastiCache
-# stacks get visited on every unrelated edit, which is slow and occasionally
-# destructive.
-#
-# A per-file content hash means the URL changes for exactly the templates whose
-# bytes changed. Editing 06 updates 06 and nothing else.
-# =============================================================================
-
 Description: >-
   Root stack for the To-Do lab: network, security groups, VPC endpoints, RDS
   with RDS Proxy, ElastiCache Redis, ALB with ECS Fargate, and the blue/green
@@ -41,36 +21,6 @@ Parameters:
     Description: >-
       Name of the bootstrap stack whose exports this stack consumes. Nothing is
       copy-pasted between the two.
-
-  # --- Packaged template hashes, written by .github/workflows/package-templates.yml
-
-  NetworkTemplateHash:
-    Type: String
-    Description: Content hash of 01-network.yaml.
-
-  SecurityTemplateHash:
-    Type: String
-    Description: Content hash of 02-security.yaml.
-
-  VpcEndpointsTemplateHash:
-    Type: String
-    Description: Content hash of 03-vpc-endpoints.yaml.
-
-  DatabaseTemplateHash:
-    Type: String
-    Description: Content hash of 04-database.yaml.
-
-  CacheTemplateHash:
-    Type: String
-    Description: Content hash of 05-cache.yaml.
-
-  AlbEcsTemplateHash:
-    Type: String
-    Description: Content hash of 06-alb-ecs.yaml.
-
-  CicdTemplateHash:
-    Type: String
-    Description: Content hash of 07-cicd-pipeline.yaml.
 
   # --- Network
 
@@ -277,11 +227,7 @@ Resources:
   NetworkStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/01-network-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref NetworkTemplateHash
+      TemplateURL: nested-templates/01-network.yaml
       Parameters:
         ProjectName: !Ref ProjectName
         VpcCidr: !Ref VpcCidr
@@ -300,11 +246,7 @@ Resources:
   SecurityStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/02-security-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref SecurityTemplateHash
+      TemplateURL: nested-templates/02-security.yaml
       Parameters:
         ProjectName: !Ref ProjectName
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
@@ -316,11 +258,7 @@ Resources:
   VpcEndpointsStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/03-vpc-endpoints-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref VpcEndpointsTemplateHash
+      TemplateURL: nested-templates/03-vpc-endpoints.yaml
       Parameters:
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
         EndpointSubnetIds: !GetAtt NetworkStack.Outputs.EndpointSubnetIds
@@ -340,11 +278,7 @@ Resources:
     # the race.
     DependsOn: VpcEndpointsStack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/04-database-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref DatabaseTemplateHash
+      TemplateURL: nested-templates/04-database.yaml
       Parameters:
         ProjectName: !Ref ProjectName
         DataSubnetIds: !GetAtt NetworkStack.Outputs.DataSubnetIds
@@ -364,11 +298,7 @@ Resources:
   CacheStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/05-cache-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref CacheTemplateHash
+      TemplateURL: nested-templates/05-cache.yaml
       Parameters:
         ProjectName: !Ref ProjectName
         CacheSubnetIds: !GetAtt NetworkStack.Outputs.CacheSubnetIds
@@ -388,11 +318,7 @@ Resources:
     # whose first task fails to pull blocks the stack until it times out.
     DependsOn: VpcEndpointsStack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/06-alb-ecs-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref AlbEcsTemplateHash
+      TemplateURL: nested-templates/06-alb-ecs.yaml
       Parameters:
         ProjectName: !Ref ProjectName
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
@@ -431,11 +357,7 @@ Resources:
   CicdStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub
-        - "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/templates/07-cicd-pipeline-${Hash}.yaml"
-        - TemplatesBucket: !ImportValue
-            Fn::Sub: "${BootstrapStackName}-TemplatesBucketName"
-          Hash: !Ref CicdTemplateHash
+      TemplateURL: nested-templates/07-cicd-pipeline.yaml
       Parameters:
         ProjectName: !Ref ProjectName
         ArtifactBucketName: !ImportValue

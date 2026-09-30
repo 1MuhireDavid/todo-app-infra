@@ -1,33 +1,9 @@
-# CloudFormation Git sync deployment file for the application root stack.
-#
-# This file is the deploy. Git sync watches the branch, and every commit that
-# changes it triggers a stack update with exactly these parameters and tags -
-# reviewable in a pull request, versioned in git, and never typed into a
-# console form.
-#
-# The seven *TemplateHash values are maintained by
-# .github/workflows/package-templates.yml. It hashes each nested template,
-# uploads any that changed, writes the new hashes here and pushes the result
-# with [skip ci]. That push is what Git sync picks up; there is no manual
-# apply step anywhere in the loop.
-#
-# Do not hand-edit the hashes. If they drift from what is in S3 the stack
-# update fails at template fetch, which is a confusing way to find out.
 
-template-file-path: cfn/root.yaml
+template-file-path: cfn/packaged/root.yaml
 
 parameters:
   ProjectName: todo-app
   BootstrapStackName: todo-app-bootstrap
-
-  # Managed by package-templates.yml
-  NetworkTemplateHash: d03fedde6dc4
-  SecurityTemplateHash: cd5e9e118c19
-  VpcEndpointsTemplateHash: b04c3b3d25db
-  DatabaseTemplateHash: 033963922f91
-  CacheTemplateHash: 4b3d878cdd21
-  AlbEcsTemplateHash: 7760d2ada142
-  CicdTemplateHash: 1cd31c65cfef
 
   # Network
   VpcCidr: 10.40.0.0/16

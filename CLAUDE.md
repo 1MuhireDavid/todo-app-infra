@@ -70,17 +70,18 @@ Block style everywhere, including intrinsics. No inline `{}` or `[]` flow style.
 Embedded JSON uses a `|` block literal. Quote anything YAML would coerce:
 `"256"`, `"false"`, `"2010-09-09"`.
 
-## Template hashes
+## Packaged template
 
-`cfn/deployment-file.yaml` holds a content hash per nested template, maintained
-by `.github/workflows/package-templates.yml`. Editing a template changes its
-hash. Do not hand-edit the hash values; let the workflow write them, or
-regenerate all seven with `git hash-object <file> | cut -c1-12`.
+`cfn/root.yaml` points at the nested templates by local path.
+`.github/workflows/package-templates.yml` runs `aws cloudformation package`,
+which uploads them to S3 and writes `cfn/packaged/root.yaml` with the S3 URLs;
+Git sync deploys that file. Never hand-edit `cfn/packaged/root.yaml`.
 
 ## Before proposing a change as done
 
-`cfn-lint cfn/root.yaml cfn/nested-templates/*.yaml` must pass with no errors
-and no warnings.
+`cfn-lint --ignore-checks W3002 -- cfn/root.yaml cfn/nested-templates/*.yaml`
+must pass with no errors and no warnings. W3002 is ignored only because it flags
+the local `TemplateURL` paths that packaging exists to resolve.
 
 ## Scope
 

@@ -19,7 +19,8 @@ no infrastructure.
 
 ```
 cfn/
-  root.yaml                  wires the nested stacks together
+  root.yaml                  wires the nested stacks together, by local path
+  packaged/root.yaml         written by CI: root.yaml with S3 URLs, what Git sync deploys
   deployment-file.yaml       parameters and tags Git sync deploys with
   nested-templates/
     01-network.yaml          VPC, four subnet tiers across 2 AZs, route tables
@@ -30,7 +31,7 @@ cfn/
     06-alb-ecs.yaml          ALB, blue/green target groups, cluster, task, service, autoscaling
     07-cicd-pipeline.yaml    CodeDeploy, CodePipeline, EventBridge
 .github/workflows/
-  package-templates.yml      lint, content-address, upload, commit hashes back
+  package-templates.yml      lint, aws cloudformation package, commit the result
 docs/architecture.md
 ```
 
@@ -114,12 +115,11 @@ yet and publishes the image without attempting a deployment. See step 3.
    | `todo-app` | `AWS_ROLE_ARN` = `…:role/todo-app-gha-app-build` | `AWS_REGION` = `us-east-1`, `ECR_REPOSITORY` = `todo-app` |
 
 2. **Publish the templates.** Push this repository to `main`. The
-   `package-templates` workflow lints every template, uploads each nested one to
-   `templates/<name>-<hash>.yaml`, writes the hashes into
-   `cfn/deployment-file.yaml` and pushes that commit with `[skip ci]`.
-
-   The hashes committed here already match the current files, so a first push
-   uploads the templates and reports "no template content changed".
+   `package-templates` workflow lints every template and runs
+   `aws cloudformation package`, which uploads each nested template to S3 under
+   a key that is the MD5 of its content and writes `cfn/packaged/root.yaml` with
+   those URLs. It commits that file, and Git sync deploys it. An unchanged
+   template keeps the same key, so its nested stack is not touched.
 
 3. **Push the first image.** In the `todo-app` repository, run the
    `build-and-push` workflow — from the Actions tab, or just push to `main`.
@@ -149,8 +149,8 @@ yet and publishes the image without attempting a deployment. See step 3.
 
 From here the loop is: push application code → image pushed → EventBridge →
 CodePipeline renders `taskdef.json` and `appspec.yaml` in CodeBuild →
-CodeDeploy shifts traffic. Push infrastructure code
-→ hashes change → Git sync updates only the nested stacks whose bytes changed.
+CodeDeploy shifts traffic. Push infrastructure code → the packaged template
+changes → Git sync updates only the nested stacks whose content changed.
 
 ---
 
@@ -343,9 +343,7 @@ Rows marked "(bootstrap repo)" are satisfied in
 | Retain on templates bucket and ECR | `00-bootstrap.yaml` (bootstrap repo) | `DeletionPolicy` / `UpdateReplacePolicy` |
 | Explicit `Delete` on the artifact bucket | `00-bootstrap.yaml` (bootstrap repo) | `ArtifactBucket` |
 | Deploy via Git sync with a checked-in deployment file | `cfn/deployment-file.yaml` | all parameters and tags |
-| Per-file content-addressed templates | `package-templates.yml` | `git hash-object \| cut -c1-12` |
-| Skip unchanged uploads | `package-templates.yml` | `aws s3api head-object` |
-| Unmapped template fails the build | `package-templates.yml` | `HASH_PARAM` check → `::error::` + `exit 1` |
+| Per-file content-addressed templates | `package-templates.yml` | `aws cloudformation package` (MD5 keys) |
 | `cfn-lint` before upload | `package-templates.yml` | "Lint templates" step |
 | Typed parameters | all | `AWS::EC2::VPC::Id`, `List<AWS::EC2::Subnet::Id>`, `CommaDelimitedList`, `AllowedValues` |
 | One `ProjectName`, `Project` tag everywhere | all | `!Sub "${ProjectName}-..."` |
