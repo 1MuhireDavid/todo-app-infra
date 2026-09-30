@@ -176,9 +176,6 @@ Resources:
         DeploymentOption: WITH_TRAFFIC_CONTROL
       BlueGreenDeploymentConfiguration:
         DeploymentReadyOption:
-          # Shift as soon as the green task set is healthy. Switch to
-          # STOP_DEPLOYMENT with a wait time if you want a manual approval gate
-          # after checking the test listener.
           ActionOnTimeout: CONTINUE_DEPLOYMENT
         TerminateBlueInstancesOnDeploymentSuccess:
           Action: TERMINATE
