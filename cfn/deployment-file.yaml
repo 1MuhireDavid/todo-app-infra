@@ -27,7 +27,7 @@ parameters:
   DatabaseTemplateHash: 033963922f91
   CacheTemplateHash: 4b3d878cdd21
   AlbEcsTemplateHash: 7760d2ada142
-  CicdTemplateHash: 1cd31c65cfef
+  CicdTemplateHash: 2dc47fece8d4
 
   # Network
   VpcCidr: 10.40.0.0/16
