@@ -75,6 +75,11 @@ Parameters:
     Type: Number
     Description: Port the application container listens on.
 
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Path the container health check requests, same as the ALB check.
+
   TaskCpu:
     Type: String
     Description: Fargate task CPU units.
@@ -376,6 +381,13 @@ Resources:
                       image: "<IMAGE1_NAME>",
                       essential: true,
                       portMappings: [{containerPort: (env.CONTAINER_PORT | tonumber), protocol: "tcp"}],
+                      healthCheck: {
+                        command: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:\(env.CONTAINER_PORT)\(env.HEALTH_CHECK_PATH) || exit 1"],
+                        interval: 30,
+                        timeout: 5,
+                        retries: 3,
+                        startPeriod: 60
+                      },
                       environment: [
                         {name: "SERVER_PORT", value: env.CONTAINER_PORT},
                         {name: "DB_HOST", value: env.DB_HOST},
@@ -431,6 +443,8 @@ Resources:
             Value: !Ref ProjectName
           - Name: CONTAINER_PORT
             Value: !Ref ContainerPort
+          - Name: HEALTH_CHECK_PATH
+            Value: !Ref HealthCheckPath
           - Name: TASK_CPU
             Value: !Ref TaskCpu
           - Name: TASK_MEMORY
