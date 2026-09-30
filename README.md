@@ -103,7 +103,15 @@ That makes the first deploy two passes of the same workflow rather than one, but
 no part of it is manual: `build-and-push` detects that the stack does not exist
 yet and publishes the image without attempting a deployment. See step 3.
 
-1. **Bootstrap stack** — above. Nothing else works without it.
+1. **Bootstrap stack** — above. Nothing else works without it. Then set the
+   workflow configuration in each repository under *Settings → Secrets and
+   variables → Actions*. The role ARNs are secrets so the account ID is masked in
+   logs; each workflow stops with a clear error if one is missing.
+
+   | Repository | Secret | Variables |
+   |---|---|---|
+   | `todo-app-infra` | `AWS_ROLE_ARN` = `…:role/todo-app-gha-infra-packaging` | `AWS_REGION` = `us-east-1`, `TEMPLATES_BUCKET` = `todo-app-cfn-templates-<account>-us-east-1` |
+   | `todo-app` | `AWS_ROLE_ARN` = `…:role/todo-app-gha-app-build` | `AWS_REGION` = `us-east-1`, `ECR_REPOSITORY` = `todo-app` |
 
 2. **Publish the templates.** Push this repository to `main`. The
    `package-templates` workflow lints every template, uploads each nested one to

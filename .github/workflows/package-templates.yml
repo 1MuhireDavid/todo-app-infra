@@ -34,10 +34,12 @@ permissions:
   id-token: write
   contents: write
 
+# The role ARN is a secret so the account ID is masked in logs; the rest are
+# repository variables. Set them under Settings > Secrets and variables > Actions.
 env:
-  AWS_REGION: us-east-1
-  AWS_ROLE_ARN: arn:aws:iam::047719661196:role/todo-app-gha-infra-packaging
-  TEMPLATES_BUCKET: todo-app-cfn-templates-047719661196-us-east-1
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TEMPLATES_BUCKET: ${{ vars.TEMPLATES_BUCKET }}
   NESTED_DIR: cfn/nested-templates
   DEPLOYMENT_FILE: cfn/deployment-file.yaml
 
@@ -68,6 +70,17 @@ jobs:
         run: |
           set -euo pipefail
           cfn-lint cfn/root.yaml "${NESTED_DIR}"/*.yaml
+
+      - name: Check repository configuration
+        run: |
+          missing=()
+          for name in AWS_ROLE_ARN AWS_REGION TEMPLATES_BUCKET; do
+            [ -z "${!name}" ] && missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing repository secrets or variables: ${missing[*]}"
+            exit 1
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
