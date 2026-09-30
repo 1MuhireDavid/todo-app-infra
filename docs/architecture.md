@@ -87,13 +87,11 @@ flowchart LR
     subgraph appgh["GitHub: todo-app"]
         acommit([push to main]) --> abuild[docker build]
         abuild --> asha["push sha-short<br/>no trigger"]
-        asha --> arender["render taskdef.json<br/>from stack outputs"]
-        arender --> azip["zip appspec + taskdef<br/>to artifact bucket"]
-        azip --> alatest(["push latest<br/>THE trigger"])
+        asha --> alatest(["push latest<br/>THE trigger"])
     end
 
-    role1{{"OIDC role: infra packaging<br/>aud + repository + ref + job_workflow_ref"}}
-    role2{{"OIDC role: app build<br/>aud + repository + ref + job_workflow_ref"}}
+    role1{{"OIDC role: infra packaging<br/>aud + sub"}}
+    role2{{"OIDC role: app build<br/>aud + sub, ECR push only"}}
 
     ilint -.assumes.-> role1
     abuild -.assumes.-> role2
@@ -105,15 +103,16 @@ flowchart LR
     iupload --> s3t
     asha --> ecrrepo
     alatest --> ecrrepo
-    azip --> s3a
 
     ipush --> sync["CloudFormation Git sync"]
     sync --> stack["root stack → 7 nested stacks"]
     s3t --> stack
 
     ecrrepo --> eb["EventBridge rule<br/>ECR Image Action / PUSH / SUCCESS<br/>filtered to repo + latest"]
-    eb --> pipe["CodePipeline<br/>2 source actions, 1 deploy action<br/>S3 source PollForSourceChanges false"]
-    s3a --> pipe
+    eb --> pipe["CodePipeline<br/>ECR source, CodeBuild render, deploy"]
+    pipe --> render["CodeBuild<br/>taskdef.json + appspec.yaml<br/>from stack parameters"]
+    render --> s3a
+    s3a --> cd
     pipe --> cd["CodeDeploy blue/green<br/>ECSAllAtOnce, 10 min blue wait"]
     cd --> svc["ECS service<br/>DeploymentController CODE_DEPLOY"]
 ```
@@ -129,7 +128,7 @@ sequenceDiagram
     participant ECS as ECS service
 
     EB->>CP: latest pushed to ECR
-    CP->>CP: S3 source (appspec + taskdef) and ECR source (imageDetail.json)
+    CP->>CP: ECR source (imageDetail.json), CodeBuild renders appspec + taskdef
     CP->>CD: CreateDeployment, IMAGE1_NAME substituted
     CD->>ECS: start green task set on the new revision
     ECS-->>ALB: register green targets on the test listener :9000

@@ -117,12 +117,10 @@ yet and publishes the image without attempting a deployment. See step 3.
    `build-and-push` workflow — from the Actions tab, or just push to `main`.
    Nothing manual, and nothing is expected to fail.
 
-   The workflow checks whether the `todo-app` stack exists. On this first run it
-   does not, so it builds the image, pushes `sha-<short>` and `latest`, and
-   skips the deploy bundle — there are no stack outputs to render `taskdef.json`
-   from and no pipeline to deploy with yet. The job summary says exactly that
-   and tells you what to do next. Pushing `latest` triggers nothing, because the
-   EventBridge rule it would fire does not exist yet either.
+   It builds the image and pushes `sha-<short>` and `latest`. Pushing `latest`
+   triggers nothing yet, because the EventBridge rule it would fire is created by
+   the stack in the next step. The stack needs the image to exist first: the
+   tasks have no internet route to fall back to.
 
    ```bash
    aws ecr describe-images --repository-name todo-app --region us-east-1 \
@@ -137,13 +135,13 @@ yet and publishes the image without attempting a deployment. See step 3.
      --query "Stacks[0].StackStatus"
    ```
 
-5. **Re-run `build-and-push`.** The same workflow, unchanged. This time it finds
-   the stack `CREATE_COMPLETE`, renders `taskdef.json` from its outputs,
-   publishes the bundle, and pushing `latest` starts the first real blue/green
-   deployment.
+5. **Re-run `build-and-push`.** The same workflow, unchanged. This time pushing
+   `latest` starts the pipeline, which renders the task definition and runs the
+   first real blue/green deployment.
 
-From here the loop is: push application code → image and bundle published →
-EventBridge → CodePipeline → CodeDeploy shifts traffic. Push infrastructure code
+From here the loop is: push application code → image pushed → EventBridge →
+CodePipeline renders `taskdef.json` and `appspec.yaml` in CodeBuild →
+CodeDeploy shifts traffic. Push infrastructure code
 → hashes change → Git sync updates only the nested stacks whose bytes changed.
 
 ---
@@ -315,7 +313,7 @@ Rows marked "(bootstrap repo)" are satisfied in
 | `Resource: "*"` justified in a comment | `00-bootstrap`, `06`, `07` | `ecr:GetAuthorizationToken`, `ecs:RegisterTaskDefinition`, `kms:Decrypt` |
 | `iam:PassRole` narrowed | `07-cicd-pipeline.yaml` | `StringEqualsIfExists` on `iam:PassedToService` |
 | OIDC only, no static keys | `00-bootstrap.yaml` (bootstrap repo) | two federated roles, `MaxSessionDuration: 3600` |
-| Trust pinned to aud + repository + ref + job_workflow_ref | `00-bootstrap.yaml` (bootstrap repo) | both `AssumeRolePolicyDocument` blocks |
+| Trust pinned to aud + sub (owner@id/repo@id, branch) | `00-bootstrap.yaml` (bootstrap repo) | both `AssumeRolePolicyDocument` blocks |
 | Tasks have no public IP | `06-alb-ecs.yaml` | `AssignPublicIp: DISABLED` |
 | Blue/green target groups | `06-alb-ecs.yaml` | `TargetGroupBlue`, `TargetGroupGreen` |
 | Prod listener 80, parameterized test listener | `06-alb-ecs.yaml` | `ProdListener`, `TestListener` |
@@ -395,14 +393,15 @@ Read this before grading.
    keeps the "never by CIDR" rule intact everywhere except the two public-facing
    ALB ingress rules.
 
-5. **The task definition exists in both repositories, and that is not
-   duplication for its own sake.** CloudFormation cannot update `TaskDefinition`
-   on a service with the `CODE_DEPLOY` controller, so `06-alb-ecs.yaml` defines
-   only the bootstrap revision the service is born with. Every revision after
-   that comes from `ecs/taskdef.json` in the app repo. The app build workflow
-   fills its account-specific values from this stack's outputs at build time
-   rather than committing them, so the two cannot silently drift into pointing at
-   different secrets. If you change the container shape, change both.
+5. **The task definition is written twice, and that is not duplication for its
+   own sake.** CloudFormation cannot update `TaskDefinition` on a service with the
+   `CODE_DEPLOY` controller, so `06-alb-ecs.yaml` defines only the bootstrap
+   revision the service is born with. Every revision after that is rendered by
+   the `RenderProject` CodeBuild step in `07-cicd-pipeline.yaml`, from the same
+   stack outputs passed in as parameters, so the two cannot drift into pointing
+   at different secrets. The app repository holds no task definition and its
+   workflow never reads this stack. If you change the container shape, change
+   both templates.
 
 6. **`EngineVersion` is the major version `"16"`**, so RDS picks the current
    minor release and the template does not rot when a minor version is
@@ -415,9 +414,9 @@ Read this before grading.
 8. **`CodePipeline` is a V1 pipeline** — flat monthly charge rather than V2's
    per-action-minute billing, and none of V2's features are used here.
 
-9. **Nothing verifies that `ecs/appspec.yaml`'s `ContainerName` matches
-   `ProjectName`.** It is `todo-app` in both. Rename the project and you must
-   change it in `06-alb-ecs.yaml`, `appspec.yaml` and `taskdef.json` together.
+9. **The container name is `ProjectName` everywhere.** The service in
+   `06-alb-ecs.yaml` and the rendered `taskdef.json` and `appspec.yaml` in `07`
+   all derive it from the same parameter, so a rename stays consistent.
 
 10. **The health check is intentionally shallow.** `/health` touches neither
     PostgreSQL nor Redis. A dependency-checking health endpoint means one RDS

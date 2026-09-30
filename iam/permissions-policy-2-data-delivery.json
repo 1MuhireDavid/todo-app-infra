@@ -120,6 +120,7 @@
             "rds.amazonaws.com",
             "codedeploy.amazonaws.com",
             "codepipeline.amazonaws.com",
+            "codebuild.amazonaws.com",
             "events.amazonaws.com"
           ]
         }
@@ -177,6 +178,17 @@
         "codepipeline:ListTagsForResource"
       ],
       "Resource": "arn:aws:codepipeline:us-east-1:047719661196:todo-app-*"
+    },
+    {
+      "Sid": "RenderBuildProject",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:DeleteProject",
+        "codebuild:BatchGetProjects"
+      ],
+      "Resource": "arn:aws:codebuild:us-east-1:047719661196:project/todo-app-*"
     },
     {
       "Sid": "EcrPushTriggerRule",

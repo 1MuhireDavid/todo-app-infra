@@ -471,6 +471,18 @@ Resources:
         TestListenerArn: !GetAtt AlbEcsStack.Outputs.TestListenerArn
         EcsExecutionRoleArn: !GetAtt AlbEcsStack.Outputs.ExecutionRoleArn
         EcsTaskRoleArn: !GetAtt AlbEcsStack.Outputs.TaskRoleArn
+        ContainerPort: !Ref ContainerPort
+        TaskCpu: !Ref TaskCpu
+        TaskMemory: !Ref TaskMemory
+        LogGroupName: !GetAtt AlbEcsStack.Outputs.LogGroupName
+        DatabaseProxyEndpoint: !GetAtt DatabaseStack.Outputs.ProxyEndpoint
+        DatabasePort: !GetAtt DatabaseStack.Outputs.DatabasePort
+        DatabaseName: !GetAtt DatabaseStack.Outputs.DatabaseName
+        DatabaseSecretArn: !GetAtt DatabaseStack.Outputs.MasterUserSecretArn
+        RedisEndpoint: !GetAtt CacheStack.Outputs.PrimaryEndpointAddress
+        RedisPort: !GetAtt CacheStack.Outputs.PrimaryEndpointPort
+        RedisAuthSecretArn: !GetAtt CacheStack.Outputs.AuthTokenSecretArn
+        CacheTtlSeconds: !Ref CacheTtlSeconds
         TerminationWaitTimeInMinutes: !Ref TerminationWaitTimeInMinutes
         DeploymentConfigName: !Ref DeploymentConfigName
       Tags:
@@ -490,9 +502,6 @@ Outputs:
   PipelineUrl:
     Description: Console link to the delivery pipeline.
     Value: !GetAtt CicdStack.Outputs.PipelineUrl
-
-  # --- Consumed by the application repository build workflow when it renders
-  # --- ecs/taskdef.json. Keep the names stable; the workflow greps for them.
 
   ClusterName:
     Description: ECS cluster name.

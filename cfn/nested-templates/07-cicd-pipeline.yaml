@@ -2,8 +2,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
   Delivery tier: CodeDeploy blue/green application and deployment group, the
-  two-source CodePipeline that drives it, and the EventBridge rule that starts
-  the pipeline on an ECR push.
+  CodePipeline that renders the task definition and drives it, and the
+  EventBridge rule that starts the pipeline on an ECR push.
 
   The artifact bucket is not created here - it belongs to the bootstrap stack,
   because the ALB in 06 needs it for access logs and this stack has to be
@@ -22,13 +22,6 @@ Parameters:
   ArtifactBucketArn:
     Type: String
     Description: Pipeline artifact bucket ARN, for scoping the pipeline role.
-
-  DeployBundleKey:
-    Type: String
-    Default: source/deploy-templates.zip
-    Description: >-
-      Key the application build workflow uploads the appspec and taskdef bundle
-      to. Must match the key in build-and-push.yml.
 
   EcrRepositoryName:
     Type: String
@@ -77,6 +70,54 @@ Parameters:
   EcsTaskRoleArn:
     Type: String
     Description: Task role the pipeline passes when registering a task definition.
+
+  ContainerPort:
+    Type: Number
+    Description: Port the application container listens on.
+
+  TaskCpu:
+    Type: String
+    Description: Fargate task CPU units.
+
+  TaskMemory:
+    Type: String
+    Description: Fargate task memory in MiB.
+
+  LogGroupName:
+    Type: String
+    Description: CloudWatch log group the tasks write to.
+
+  DatabaseProxyEndpoint:
+    Type: String
+    Description: RDS Proxy endpoint the application connects to.
+
+  DatabasePort:
+    Type: String
+    Description: PostgreSQL port.
+
+  DatabaseName:
+    Type: String
+    Description: Application database name.
+
+  DatabaseSecretArn:
+    Type: String
+    Description: Secret holding the database username and password.
+
+  RedisEndpoint:
+    Type: String
+    Description: ElastiCache primary endpoint.
+
+  RedisPort:
+    Type: String
+    Description: Redis port.
+
+  RedisAuthSecretArn:
+    Type: String
+    Description: Secret holding the Redis AUTH token.
+
+  CacheTtlSeconds:
+    Type: Number
+    Description: Read cache TTL passed to the application.
 
   TerminationWaitTimeInMinutes:
     Type: Number
@@ -249,6 +290,12 @@ Resources:
                   # at this project's cluster.
                   ArnEqualsIfExists:
                     "ecs:cluster": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}"
+              - Sid: RunRenderBuild
+                Effect: Allow
+                Action:
+                  - "codebuild:StartBuild"
+                  - "codebuild:BatchGetBuilds"
+                Resource: !GetAtt RenderProject.Arn
               - Sid: PassEcsRoles
                 Effect: Allow
                 Action:
@@ -261,6 +308,155 @@ Resources:
                   # be handed to EC2, Lambda or anything else.
                   StringEqualsIfExists:
                     "iam:PassedToService": ecs-tasks.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  RenderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-render-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: render-deploy-bundle
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-render:*"
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:PutObject"
+                Resource: !Sub "${ArtifactBucketArn}/*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Rendered here rather than copied from 06: CloudFormation cannot update a
+  # CODE_DEPLOY service, so this buildspec is the live container shape.
+  RenderProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-render"
+      ServiceRole: !GetAtt RenderRole.Arn
+      TimeoutInMinutes: 5
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - |
+                  jq -n '{
+                    family: env.TASK_FAMILY,
+                    networkMode: "awsvpc",
+                    requiresCompatibilities: ["FARGATE"],
+                    cpu: env.TASK_CPU,
+                    memory: env.TASK_MEMORY,
+                    executionRoleArn: env.EXECUTION_ROLE_ARN,
+                    taskRoleArn: env.TASK_ROLE_ARN,
+                    runtimePlatform: {cpuArchitecture: "X86_64", operatingSystemFamily: "LINUX"},
+                    containerDefinitions: [{
+                      name: env.CONTAINER_NAME,
+                      image: "<IMAGE1_NAME>",
+                      essential: true,
+                      portMappings: [{containerPort: (env.CONTAINER_PORT | tonumber), protocol: "tcp"}],
+                      environment: [
+                        {name: "SERVER_PORT", value: env.CONTAINER_PORT},
+                        {name: "DB_HOST", value: env.DB_HOST},
+                        {name: "DB_PORT", value: env.DB_PORT},
+                        {name: "DB_NAME", value: env.DB_NAME},
+                        {name: "REDIS_HOST", value: env.REDIS_HOST},
+                        {name: "REDIS_PORT", value: env.REDIS_PORT},
+                        {name: "CACHE_TTL_SECONDS", value: env.CACHE_TTL_SECONDS}
+                      ],
+                      secrets: [
+                        {name: "DB_USERNAME", valueFrom: "\(env.DB_SECRET_ARN):username::"},
+                        {name: "DB_PASSWORD", valueFrom: "\(env.DB_SECRET_ARN):password::"},
+                        {name: "REDIS_AUTH_TOKEN", valueFrom: "\(env.REDIS_SECRET_ARN):authToken::"}
+                      ],
+                      logConfiguration: {
+                        logDriver: "awslogs",
+                        options: {
+                          "awslogs-group": env.LOG_GROUP,
+                          "awslogs-region": env.AWS_REGION,
+                          "awslogs-stream-prefix": "app"
+                        }
+                      }
+                    }]
+                  }' > taskdef.json
+                - |
+                  cat > appspec.yaml <<EOF
+                  version: 0.0
+                  Resources:
+                    - TargetService:
+                        Type: AWS::ECS::Service
+                        Properties:
+                          TaskDefinition: <TASK_DEFINITION>
+                          LoadBalancerInfo:
+                            ContainerName: ${CONTAINER_NAME}
+                            ContainerPort: ${CONTAINER_PORT}
+                          PlatformVersion: LATEST
+                  EOF
+                - cat taskdef.json appspec.yaml
+          artifacts:
+            files:
+              - taskdef.json
+              - appspec.yaml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+        EnvironmentVariables:
+          - Name: TASK_FAMILY
+            Value: !Sub "${ProjectName}-task"
+          - Name: CONTAINER_NAME
+            Value: !Ref ProjectName
+          - Name: CONTAINER_PORT
+            Value: !Ref ContainerPort
+          - Name: TASK_CPU
+            Value: !Ref TaskCpu
+          - Name: TASK_MEMORY
+            Value: !Ref TaskMemory
+          - Name: EXECUTION_ROLE_ARN
+            Value: !Ref EcsExecutionRoleArn
+          - Name: TASK_ROLE_ARN
+            Value: !Ref EcsTaskRoleArn
+          - Name: LOG_GROUP
+            Value: !Ref LogGroupName
+          - Name: DB_HOST
+            Value: !Ref DatabaseProxyEndpoint
+          - Name: DB_PORT
+            Value: !Ref DatabasePort
+          - Name: DB_NAME
+            Value: !Ref DatabaseName
+          - Name: DB_SECRET_ARN
+            Value: !Ref DatabaseSecretArn
+          - Name: REDIS_HOST
+            Value: !Ref RedisEndpoint
+          - Name: REDIS_PORT
+            Value: !Ref RedisPort
+          - Name: REDIS_SECRET_ARN
+            Value: !Ref RedisAuthSecretArn
+          - Name: CACHE_TTL_SECONDS
+            Value: !Ref CacheTtlSeconds
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -280,24 +476,6 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            - Name: DeployBundle
-              ActionTypeId:
-                Category: Source
-                Owner: AWS
-                Provider: S3
-                Version: "1"
-              Configuration:
-                S3Bucket: !Ref ArtifactBucketName
-                S3ObjectKey: !Ref DeployBundleKey
-                # False on purpose. Both source actions land within seconds of
-                # each other in one build; if S3 polling were left on, the zip
-                # upload would start one execution and the ECR push another,
-                # and the pipeline would deploy the same commit twice. The
-                # EventBridge rule below is the single trigger.
-                PollForSourceChanges: "false"
-              OutputArtifacts:
-                - Name: DeployBundleArtifact
-              RunOrder: 1
             - Name: ContainerImage
               ActionTypeId:
                 Category: Source
@@ -309,6 +487,21 @@ Resources:
                 ImageTag: !Ref ImageTag
               OutputArtifacts:
                 - Name: ImageArtifact
+              RunOrder: 1
+        - Name: Render
+          Actions:
+            - Name: TaskDefinition
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref RenderProject
+              InputArtifacts:
+                - Name: ImageArtifact
+              OutputArtifacts:
+                - Name: DeployBundleArtifact
               RunOrder: 1
         - Name: Deploy
           Actions:
