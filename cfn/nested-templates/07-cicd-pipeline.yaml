@@ -121,17 +121,6 @@ Parameters:
     Type: Number
     Description: Read cache TTL passed to the application.
 
-  DeploymentConfigName:
-    Type: String
-    Default: CodeDeployDefault.ECSAllAtOnce
-    AllowedValues:
-      - CodeDeployDefault.ECSAllAtOnce
-      - CodeDeployDefault.ECSLinear10PercentEvery1Minutes
-      - CodeDeployDefault.ECSCanary10Percent5Minutes
-    Description: >-
-      All-at-once for the lab, so a demo deploy finishes in a couple of
-      minutes. A canary configuration is the production default.
-
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -170,7 +159,7 @@ Resources:
       ApplicationName: !Ref CodeDeployApplication
       DeploymentGroupName: !Sub "${ProjectName}-dg"
       ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
-      DeploymentConfigName: !Ref DeploymentConfigName
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
         DeploymentOption: WITH_TRAFFIC_CONTROL

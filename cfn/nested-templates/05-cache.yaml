@@ -20,32 +20,6 @@ Parameters:
     Type: AWS::EC2::SecurityGroup::Id
     Description: Security group for the nodes - admits the ECS tasks only.
 
-  CacheNodeType:
-    Type: String
-    Default: cache.t4g.micro
-    AllowedValues:
-      - cache.t4g.micro
-      - cache.t4g.small
-      - cache.t3.micro
-      - cache.t3.small
-    Description: >-
-      t4g.micro is the cheapest node that supports encryption in transit, at
-      roughly 0.016 USD an hour in us-east-1.
-
-  CacheReplicaCount:
-    Type: Number
-    Default: 1
-    MinValue: 0
-    MaxValue: 2
-    Description: >-
-      Replicas behind the primary. The tradeoff the lab has to make explicit -
-      ElastiCache will only mark a replication group Multi-AZ if it has at
-      least one replica to fail over to, so "multi-AZ" costs exactly double the
-      node bill (about 23 USD a month for two t4g.micro nodes rather than 12).
-      Set this to 0 to halve the cost and give up automatic failover; the
-      template then also turns MultiAZEnabled off, because AWS rejects a
-      single-node group that claims to be Multi-AZ.
-
   RedisPort:
     Type: Number
     Default: 6379
@@ -66,13 +40,6 @@ Parameters:
     Description: >-
       Must match the engine major version - default.redis7 for 7.x. A mismatch
       here fails at create time with a fairly unhelpful message.
-
-Conditions:
-
-  HasReplica: !Not
-    - !Equals
-      - !Ref CacheReplicaCount
-      - 0
 
 Resources:
 
@@ -123,20 +90,10 @@ Resources:
       Engine: redis
       EngineVersion: !Ref EngineVersion
       CacheParameterGroupName: !Ref CacheParameterGroupName
-      CacheNodeType: !Ref CacheNodeType
-      # One primary plus the requested replicas.
-      NumCacheClusters: !If
-        - HasReplica
-        - 2
-        - 1
-      AutomaticFailoverEnabled: !If
-        - HasReplica
-        - true
-        - false
-      MultiAZEnabled: !If
-        - HasReplica
-        - true
-        - false
+      CacheNodeType: cache.t4g.micro
+      NumCacheClusters: 2
+      AutomaticFailoverEnabled: true
+      MultiAZEnabled: true
       Port: !Ref RedisPort
       CacheSubnetGroupName: !Ref CacheSubnetGroup
       SecurityGroupIds:

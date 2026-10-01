@@ -234,7 +234,7 @@ Levers, in order of return:
 1. **Delete the application stack when you are not demoing.** Bootstrap is
    retained, so a redeploy is one Git sync run plus ~25 minutes. This saves
    effectively all of it.
-2. `CacheReplicaCount: 0` — saves ~$12/month, gives up Multi-AZ failover.
+2. One cache node instead of two (`NumCacheClusters: 1`, failover and Multi-AZ off in `05-cache.yaml`) — saves ~$12/month, gives up Multi-AZ failover.
 3. Drop the `sts` endpoint — saves ~$15/month. Fargate does not need it; only an
    application calling STS directly does, and this one calls no AWS API at all.
 4. Put the interface endpoints in one AZ — saves ~$37/month, gives up AZ
@@ -318,7 +318,7 @@ Rows marked "(bootstrap repo)" are satisfied in
 | Redis encrypted both ways | `05-cache.yaml` | `TransitEncryptionEnabled`, `AtRestEncryptionEnabled` |
 | AUTH token generated, never a parameter | `05-cache.yaml` | `AuthTokenSecret` + `GenerateSecretString` |
 | Replication group, not cache cluster | `05-cache.yaml` | `AWS::ElastiCache::ReplicationGroup` |
-| Multi-AZ cache | `05-cache.yaml` | `MultiAZEnabled` + `CacheReplicaCount: 1` |
+| Multi-AZ cache | `05-cache.yaml` | `MultiAZEnabled: true` + `NumCacheClusters: 2` |
 | Credentials in `Secrets:`, never `Environment:` | `06-alb-ecs.yaml` | `Secrets` with `:password::` selectors |
 | Execution role separate from task role | `06-alb-ecs.yaml` | `ExecutionRole`, `TaskRole` (no policies) |
 | `Resource: "*"` justified in a comment | `00-bootstrap`, `06`, `07` | `ecr:GetAuthorizationToken`, `ecs:RegisterTaskDefinition`, `kms:Decrypt` |
@@ -342,7 +342,7 @@ Rows marked "(bootstrap repo)" are satisfied in
 | Buckets: versioning, SSE, PAB, lifecycle, TLS-only | `00-bootstrap.yaml` (bootstrap repo) | both buckets + both policies |
 | Retain on templates bucket and ECR | `00-bootstrap.yaml` (bootstrap repo) | `DeletionPolicy` / `UpdateReplacePolicy` |
 | Explicit `Delete` on the artifact bucket | `00-bootstrap.yaml` (bootstrap repo) | `ArtifactBucket` |
-| Deploy via Git sync with a checked-in deployment file | `cfn/deployment-file.yaml` | all parameters and tags |
+| Deploy via Git sync with a checked-in deployment file | `cfn/deployment-file.yaml` | the few shared parameters and the tags; single-use values are written in the templates |
 | Per-file content-addressed templates | `package-templates.yml` | `aws cloudformation package` (MD5 keys) |
 | `cfn-lint` before upload | `package-templates.yml` | "Lint templates" step |
 | Typed parameters | all | `AWS::EC2::VPC::Id`, `List<AWS::EC2::Subnet::Id>`, `CommaDelimitedList`, `AllowedValues` |
@@ -359,7 +359,7 @@ Named here rather than silently skipped.
 | **TLS on the ALB** | ACM certificate on an HTTPS:443 listener, HTTP:80 redirecting to it, a modern `SslPolicy`. Skipped because the lab has no domain. Today the app is served over plain HTTP on port 80; the test listener is not reachable from outside. |
 | **WAF, Shield Advanced, GuardDuty, CloudTrail data events** | WAF web ACL on the ALB with managed rule groups and rate limiting; GuardDuty on for the account; CloudTrail data events on both buckets. |
 | **Multi-region, cross-region replication, PITR beyond 1 day** | Cross-region automated backup replication, 7–35 day retention, a tested restore runbook. `BackupRetentionPeriod` is 1 here. |
-| **RDS Multi-AZ** | On. It is a parameter defaulting to `"false"` purely for cost — flip `MultiAZ` in the deployment file. |
+| **RDS Multi-AZ** | On. It is `MultiAZ: false` in `04-database.yaml` purely for cost. |
 | **`verify-full` TLS to PostgreSQL** | RDS CA bundle in the image and `sslmode=verify-full`. The lab uses `sslmode=require`, which encrypts but does not verify the server certificate. |
 | **Schema migrations** | Flyway or Liquibase. The lab uses `spring.jpa.hibernate.ddl-auto=update`, which is fine for one table and wrong for anything else. |
 | **Secret rotation for Redis** | A rotation Lambda. RDS rotates its own master secret; the Redis AUTH token does not rotate. |
@@ -417,20 +417,28 @@ Read this before grading.
 
 6. **`EngineVersion` is the major version `"16"`**, so RDS picks the current
    minor release and the template does not rot when a minor version is
-   deprecated. Production pins the full version.
+   deprecated. Production pins the full version. cfn-lint's version data lists
+   bare `"16"` as deprecated (W3691), so that one check is suppressed in the
+   `DbInstance` metadata.
 
-7. **Private route tables are per AZ, shared across the three private tiers.**
+7. **Values used once are written in the template, not passed as parameters.**
+   Only values shared by several stacks (`ProjectName`, `ContainerPort`,
+   `TaskCpu`, `TaskMemory`, `CacheTtlSeconds`, `ImageTag`) and the bootstrap
+   stack name stay in `deployment-file.yaml`. Sizes, CIDRs and scaling bounds
+   live next to the resource they configure.
+
+8. **Private route tables are per AZ, shared across the three private tiers.**
    With no NAT the three tiers route identically, so per-tier tables would be six
    identical tables. Split them the moment a tier needs different egress.
 
-8. **`CodePipeline` is a V1 pipeline** — flat monthly charge rather than V2's
+9. **`CodePipeline` is a V1 pipeline** — flat monthly charge rather than V2's
    per-action-minute billing, and none of V2's features are used here.
 
-9. **The container name is `ProjectName` everywhere.** The service in
+10. **The container name is `ProjectName` everywhere.** The service in
    `06-alb-ecs.yaml` and the rendered `taskdef.json` and `appspec.yaml` in `07`
    all derive it from the same parameter, so a rename stays consistent.
 
-10. **The health check is intentionally shallow.** `/health` touches neither
+11. **The health check is intentionally shallow.** `/health` touches neither
     PostgreSQL nor Redis. A dependency-checking health endpoint means one RDS
     failover makes every task unhealthy at once and the ALB drains all of them —
     a recoverable blip becomes an outage. The tradeoff is that a task with a dead

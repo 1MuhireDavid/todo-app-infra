@@ -4,48 +4,11 @@ template-file-path: cfn/packaged/root.yaml
 parameters:
   ProjectName: todo-app
   BootstrapStackName: todo-app-bootstrap
-
-  # Network
-  VpcCidr: 10.40.0.0/16
-  PublicSubnet1Cidr: 10.40.0.0/24
-  PublicSubnet2Cidr: 10.40.1.0/24
-  AppSubnet1Cidr: 10.40.10.0/24
-  AppSubnet2Cidr: 10.40.11.0/24
-  DataSubnet1Cidr: 10.40.20.0/24
-  DataSubnet2Cidr: 10.40.21.0/24
-  CacheSubnet1Cidr: 10.40.30.0/24
-  CacheSubnet2Cidr: 10.40.31.0/24
-
-  # Ports and access
   ContainerPort: 8080
-  TestListenerPort: 9000
-
-  # Database - no credential here, and there never will be. RDS generates the
-  # master password into Secrets Manager and the templates only pass its ARN.
-  DatabaseName: todoapp
-  MasterUsername: todoadmin
-  DBInstanceClass: db.t3.micro
-  DatabaseEngineVersion: "16"
-  MultiAZ: "false"
-  BackupRetentionPeriod: 1
-
-  # Cache - 1 replica is what makes the group Multi-AZ, at double the node cost
-  CacheNodeType: cache.t4g.micro
-  CacheReplicaCount: 1
   CacheTtlSeconds: 60
-
-  # Compute
   ImageTag: latest
   TaskCpu: "512"
   TaskMemory: "1024"
-  DesiredCount: 1
-  MinCapacity: 1
-  MaxCapacity: 4
-  CpuTargetValue: 60
-  LogRetentionDays: 14
-
-  # Delivery
-  DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
 
 tags:
   Project: todo-app
