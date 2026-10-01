@@ -417,14 +417,14 @@ Read this before grading.
 
 6. **`EngineVersion` is the major version `"16"`**, so RDS picks the current
    minor release and the template does not rot when a minor version is
-   deprecated. Production pins the full version. cfn-lint's version data lists
-   bare `"16"` as deprecated (W3691), so that one check is suppressed in the
-   `DbInstance` metadata.
+   deprecated. Production pins the full version. It stays a parameter: written
+   directly, cfn-lint's version data flags a bare `"16"` as deprecated (W3691),
+   even though RDS accepts it.
 
 7. **Values used once are written in the template, not passed as parameters.**
    Only values shared by several stacks (`ProjectName`, `ContainerPort`,
-   `TaskCpu`, `TaskMemory`, `CacheTtlSeconds`, `ImageTag`) and the bootstrap
-   stack name stay in `deployment-file.yaml`. Sizes, CIDRs and scaling bounds
+   `TaskCpu`, `TaskMemory`, `CacheTtlSeconds`, `ImageTag`), the bootstrap
+   stack name and `DatabaseEngineVersion` stay in `deployment-file.yaml`. Sizes, CIDRs and scaling bounds
    live next to the resource they configure.
 
 8. **Private route tables are per AZ, shared across the three private tiers.**

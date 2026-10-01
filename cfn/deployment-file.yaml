@@ -5,6 +5,7 @@ parameters:
   ProjectName: todo-app
   BootstrapStackName: todo-app-bootstrap
   ContainerPort: 8080
+  DatabaseEngineVersion: "16"
   CacheTtlSeconds: 60
   ImageTag: latest
   TaskCpu: "512"

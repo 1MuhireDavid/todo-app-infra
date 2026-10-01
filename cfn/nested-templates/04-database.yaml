@@ -26,6 +26,15 @@ Parameters:
     Type: AWS::EC2::SecurityGroup::Id
     Description: Security group for the proxy ENIs.
 
+  EngineVersion:
+    Type: String
+    Default: "16"
+    Description: >-
+      Major version only, so RDS selects the current minor release and the
+      template does not rot when a minor version is deprecated. Pin the full
+      version in production, where an unplanned minor upgrade is a change you
+      want to schedule.
+
   AllocatedStorage:
     Type: Number
     Default: 20
@@ -69,16 +78,11 @@ Resources:
     # identifier. Delete is the right lab behaviour; production keeps Snapshot.
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
-    Metadata:
-      cfn-lint:
-        config:
-          ignore_checks:
-            - W3691
     Properties:
       DBInstanceIdentifier: !Sub "${ProjectName}-db"
       DBName: todoapp
       Engine: postgres
-      EngineVersion: "16"
+      EngineVersion: !Ref EngineVersion
       DBInstanceClass: db.t3.micro
       AllocatedStorage: !Ref AllocatedStorage
       StorageType: gp3
