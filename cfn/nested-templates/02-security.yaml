@@ -39,68 +39,6 @@ Parameters:
 
 Resources:
 
-  VpcEndpointSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${ProjectName}-sg-vpce"
-      GroupDescription: Interface VPC endpoints - ECR, logs, STS, Secrets Manager.
-      VpcId: !Ref VpcId
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-sg-vpce"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  DatabaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${ProjectName}-sg-rds"
-      GroupDescription: RDS PostgreSQL instance - reachable from the RDS Proxy only.
-      VpcId: !Ref VpcId
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-sg-rds"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  CacheSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${ProjectName}-sg-cache"
-      GroupDescription: ElastiCache Redis nodes - reachable from the ECS tasks only.
-      VpcId: !Ref VpcId
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-sg-cache"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  RdsProxySecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${ProjectName}-sg-rdsproxy"
-      GroupDescription: RDS Proxy ENIs - reachable from the ECS tasks only.
-      VpcId: !Ref VpcId
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-sg-rdsproxy"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  EcsTaskSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${ProjectName}-sg-ecs"
-      GroupDescription: Fargate tasks - reachable from the ALB only.
-      VpcId: !Ref VpcId
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-sg-ecs"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # The test listener has no ingress rule on purpose: the green task set is
-  # checked by the ALB health check, never exposed to the internet.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -119,47 +57,81 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
-  EcsIngressFromAlb:
-    Type: AWS::EC2::SecurityGroupIngress
+  EcsTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupId: !Ref EcsTaskSecurityGroup
-      IpProtocol: tcp
-      FromPort: !Ref ContainerPort
-      ToPort: !Ref ContainerPort
-      SourceSecurityGroupId: !Ref AlbSecurityGroup
-      Description: Container port from the ALB only.
+      GroupName: !Sub "${ProjectName}-sg-ecs"
+      GroupDescription: Fargate tasks - reachable from the ALB only.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: Container port from the ALB only.
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg-ecs"
+        - Key: Project
+          Value: !Ref ProjectName
 
-  RdsProxyIngressFromEcs:
-    Type: AWS::EC2::SecurityGroupIngress
+  RdsProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupId: !Ref RdsProxySecurityGroup
-      IpProtocol: tcp
-      FromPort: !Ref DatabasePort
-      ToPort: !Ref DatabasePort
-      SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
-      Description: PostgreSQL from the ECS tasks.
+      GroupName: !Sub "${ProjectName}-sg-rdsproxy"
+      GroupDescription: RDS Proxy ENIs - reachable from the ECS tasks only.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref DatabasePort
+          ToPort: !Ref DatabasePort
+          SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
+          Description: PostgreSQL from the ECS tasks.
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg-rdsproxy"
+        - Key: Project
+          Value: !Ref ProjectName
 
   # Not from the task group, so the application cannot bypass the proxy.
-  DatabaseIngressFromRdsProxy:
-    Type: AWS::EC2::SecurityGroupIngress
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupId: !Ref DatabaseSecurityGroup
-      IpProtocol: tcp
-      FromPort: !Ref DatabasePort
-      ToPort: !Ref DatabasePort
-      SourceSecurityGroupId: !Ref RdsProxySecurityGroup
-      Description: PostgreSQL from the RDS Proxy only.
+      GroupName: !Sub "${ProjectName}-sg-rds"
+      GroupDescription: RDS PostgreSQL instance - reachable from the RDS Proxy only.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref DatabasePort
+          ToPort: !Ref DatabasePort
+          SourceSecurityGroupId: !Ref RdsProxySecurityGroup
+          Description: PostgreSQL from the RDS Proxy only.
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg-rds"
+        - Key: Project
+          Value: !Ref ProjectName
 
-  CacheIngressFromEcs:
-    Type: AWS::EC2::SecurityGroupIngress
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupId: !Ref CacheSecurityGroup
-      IpProtocol: tcp
-      FromPort: !Ref RedisPort
-      ToPort: !Ref RedisPort
-      SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
-      Description: Redis from the ECS tasks.
+      GroupName: !Sub "${ProjectName}-sg-cache"
+      GroupDescription: ElastiCache Redis nodes - reachable from the ECS tasks only.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref RedisPort
+          ToPort: !Ref RedisPort
+          SourceSecurityGroupId: !Ref EcsTaskSecurityGroup
+          Description: Redis from the ECS tasks.
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg-cache"
+        - Key: Project
+          Value: !Ref ProjectName
 
+  # A group cannot reference itself in its own definition, so replication
+  # between the primary and the replica is a standalone rule.
   CacheIngressFromSelf:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -172,15 +144,23 @@ Resources:
 
   # Covers every client in the VPC, including the RDS Proxy reading its secret
   # through the Secrets Manager endpoint.
-  VpcEndpointIngressFromVpc:
-    Type: AWS::EC2::SecurityGroupIngress
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupId: !Ref VpcEndpointSecurityGroup
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      CidrIp: !Ref VpcCidr
-      Description: HTTPS from anything in the VPC to the interface endpoints.
+      GroupName: !Sub "${ProjectName}-sg-vpce"
+      GroupDescription: Interface VPC endpoints - ECR, logs, STS, Secrets Manager.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from anything in the VPC to the interface endpoints.
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg-vpce"
+        - Key: Project
+          Value: !Ref ProjectName
 
 Outputs:
 
